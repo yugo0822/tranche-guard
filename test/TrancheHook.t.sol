@@ -96,6 +96,15 @@ contract TrancheHookTest is Test, Deployers {
         console2.log("seniorFeeClaim", aft.seniorFeeClaim);
     }
 
+    /* ───────────────────────── tick 範囲の保存 ───────────────────────── */
+
+    function test_position_storesTickRange() public {
+        TrancheHook.LpPosition memory pos = hook.getPosition(poolId, juniorLp);
+        assertEq(pos.tickLower, int24(-887220), "tickLower not stored");
+        assertEq(pos.tickUpper, int24(887220), "tickUpper not stored");
+        assertTrue(pos.active, "position should be active");
+    }
+
     /* ───────────────────────── [V3] fund→LP 決済 ───────────────────────── */
 
     function test_V3_settlementPaysFromFund() public {

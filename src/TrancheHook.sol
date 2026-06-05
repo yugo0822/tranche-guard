@@ -12,6 +12,7 @@ import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
+import {TickMath} from "v4-core/libraries/TickMath.sol";
 
 import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 
@@ -57,6 +58,8 @@ contract TrancheHook is BaseHook {
         Tranche tranche;
         uint256 principal;
         uint160 sqrtPriceEntryX96;
+        int24 tickLower;
+        int24 tickUpper;
         bool active;
     }
 
@@ -151,7 +154,7 @@ contract TrancheHook is BaseHook {
     function _afterAddLiquidity(
         address,
         PoolKey calldata key,
-        ModifyLiquidityParams calldata,
+        ModifyLiquidityParams calldata params,
         BalanceDelta,
         BalanceDelta,
         bytes calldata hookData
@@ -169,7 +172,13 @@ contract TrancheHook is BaseHook {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
         positions[poolId][lp] = LpPosition({
-            owner: lp, tranche: tranche, principal: principal, sqrtPriceEntryX96: sqrtPriceX96, active: true
+            owner: lp,
+            tranche: tranche,
+            principal: principal,
+            sqrtPriceEntryX96: sqrtPriceX96,
+            tickLower: params.tickLower,
+            tickUpper: params.tickUpper,
+            active: true
         });
 
         PoolAccount storage acct = poolAccounts[poolId];
@@ -249,7 +258,12 @@ contract TrancheHook is BaseHook {
 
         PoolAccount storage acct = poolAccounts[poolId];
 
-        uint256 ilWad = ILMath.ilFromSqrtPrices(pos.sqrtPriceEntryX96, acct.sqrtPriceEmaX96);
+        uint256 ilWad = ILMath.ilFromSqrtPrices(
+            pos.sqrtPriceEntryX96,
+            acct.sqrtPriceEmaX96,
+            TickMath.getSqrtPriceAtTick(pos.tickLower),
+            TickMath.getSqrtPriceAtTick(pos.tickUpper)
+        );
         uint256 ilLoss = ILMath.ilAmount(pos.principal, ilWad);
 
         uint256 lossBorne;
@@ -320,7 +334,12 @@ contract TrancheHook is BaseHook {
     function quoteRealizedIl(PoolId poolId, address lp) external view returns (uint256 ilWad, uint256 ilLoss) {
         LpPosition memory pos = positions[poolId][lp];
         if (pos.owner == address(0) || !pos.active) return (0, 0);
-        ilWad = ILMath.ilFromSqrtPrices(pos.sqrtPriceEntryX96, poolAccounts[poolId].sqrtPriceEmaX96);
+        ilWad = ILMath.ilFromSqrtPrices(
+            pos.sqrtPriceEntryX96,
+            poolAccounts[poolId].sqrtPriceEmaX96,
+            TickMath.getSqrtPriceAtTick(pos.tickLower),
+            TickMath.getSqrtPriceAtTick(pos.tickUpper)
+        );
         ilLoss = ILMath.ilAmount(pos.principal, ilWad);
     }
 
