@@ -155,7 +155,7 @@ contract TrancheHook is BaseHook {
         address,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
-        BalanceDelta,
+        BalanceDelta delta,
         BalanceDelta,
         bytes calldata hookData
     ) internal override returns (bytes4, BalanceDelta) {
@@ -163,13 +163,19 @@ contract TrancheHook is BaseHook {
             return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
-        (address lp, Tranche tranche, uint256 principal) = _decodeHookData(hookData);
+        (address lp, Tranche tranche,) = _decodeHookData(hookData);
         // TODO[auth]: lp は hookData 由来で詐称可能。本番は PositionManager の owner と突合する。
 
         PoolId poolId = key.toId();
         if (positions[poolId][lp].active) revert PositionAlreadyActive();
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
+
+        int128 d0 = delta.amount0();
+        int128 d1 = delta.amount1();
+        uint256 amt0 = d0 < 0 ? uint256(uint128(-d0)) : 0;
+        uint256 amt1 = d1 < 0 ? uint256(uint128(-d1)) : 0;
+        uint256 principal = ILMath.depositValueInToken1(amt0, amt1, sqrtPriceX96);
 
         positions[poolId][lp] = LpPosition({
             owner: lp,

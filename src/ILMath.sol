@@ -126,4 +126,21 @@ library ILMath {
     function ilAmount(uint256 principal, uint256 ilWad) internal pure returns (uint256) {
         return FullMath.mulDiv(principal, ilWad, WAD);
     }
+
+    /// @notice 預入トークン量を entry 価格で token1 建て評価する（principal の信頼担保用）。
+    /// @dev value = amount1 + amount0 · P,  P = sqrtPriceX96² / Q96²。
+    ///      hookData の自己申告ではなく PoolManager 由来の実 delta から principal を出すことで、
+    ///      principal 水増しによる手数料按分/保護のドレインを封じる。
+    ///      fund(currency1) とウォーターフォールの次元を揃えるため token1 建てにする。
+    ///      これは同時に HODL 基準額（entry 数量を current で評価する分母）の entry 時点の値でもある。
+    function depositValueInToken1(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96)
+        internal
+        pure
+        returns (uint256)
+    {
+        // p = sqrtP² / Q96  (= P · Q96, Q96スケールの価格)
+        uint256 p = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
+        // amount0 · P = amount0 · p / Q96
+        return amount1 + FullMath.mulDiv(amount0, p, Q96);
+    }
 }

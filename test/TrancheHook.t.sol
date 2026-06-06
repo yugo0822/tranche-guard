@@ -98,7 +98,7 @@ contract TrancheHookTest is Test, Deployers {
 
     /* ───────────────────────── tick 範囲の保存 ───────────────────────── */
 
-    function test_position_storesTickRange() public {
+    function test_position_storesTickRange() public view{
         TrancheHook.LpPosition memory pos = hook.getPosition(poolId, juniorLp);
         assertEq(pos.tickLower, int24(-887220), "tickLower not stored");
         assertEq(pos.tickUpper, int24(887220), "tickUpper not stored");
@@ -167,7 +167,8 @@ contract TrancheHookTest is Test, Deployers {
 
         // 4c) absorbed は過不足なく min(IL, buffer, fund)（過剰肩代わりも取りこぼしもない）
         //     bufferAmount は hook と同一の ILMath.ilAmount で算出して厳密一致を確認。
-        uint256 bufferAmount = ILMath.ilAmount(10 ether, BUFFER_WAD);
+        uint256 principal = hook.getPosition(poolId, seniorLp).principal;
+        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
         uint256 expectedAbsorbed = _min3(ilLoss, bufferAmount, before.juniorFundClaim);
         assertEq(absorbed, expectedAbsorbed, "absorbed != min(IL, buffer, fund)");
 

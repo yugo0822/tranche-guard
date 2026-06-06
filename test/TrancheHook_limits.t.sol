@@ -55,7 +55,8 @@ contract TrancheHookLimitsTest is Test, Deployers {
         }
 
         (, uint256 ilLoss) = hook.quoteRealizedIl(poolId, seniorLp);
-        uint256 bufferAmount = ILMath.ilAmount(10 ether, BUFFER_WAD);
+        uint256 principal = hook.getPosition(poolId, seniorLp).principal;
+        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
 
         // 前提: IL が buffer を超えていること（超えていなければスワップ量/レンジ調整の合図）
         assertGt(ilLoss, bufferAmount, "IL <= buffer -> widen price move (more/bigger swaps, narrower range)");
@@ -104,7 +105,8 @@ contract TrancheHookLimitsTest is Test, Deployers {
         assertGt(ilLoss, 0, "no IL created");
 
         TrancheHook.PoolAccount memory bef = hook.getPoolAccount(poolId);
-        uint256 bufferAmount = ILMath.ilAmount(10 ether, BUFFER_WAD);
+        uint256 principal = hook.getPosition(poolId, seniorLp).principal;
+        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
 
         // 前提: fund が「IL と buffer の両方」より小さい → fund 側で頭打ちになる状況
         assertLt(bef.juniorFundClaim, ilLoss, "fund not the binding constraint vs IL");
