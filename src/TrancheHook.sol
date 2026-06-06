@@ -18,7 +18,7 @@ import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 
 import {ILMath} from "./ILMath.sol";
 
-/// @title TrancheHook 
+/// @title TrancheHook
 /// @notice Senior / Junior の2トランチで IL をウォーターフォール充当する Uniswap v4 hook。
 ///
 /// ─────────────────────────────────────────────────────────────────────────
@@ -44,7 +44,7 @@ import {ILMath} from "./ILMath.sol";
 /// ─────────────────────────────────────────────────────────────────────────
 contract TrancheHook is BaseHook {
     using StateLibrary for IPoolManager;
-    using CurrencySettler for Currency; 
+    using CurrencySettler for Currency;
 
     /* ───────────────────────── 型定義 ───────────────────────── */
 
@@ -94,7 +94,12 @@ contract TrancheHook is BaseHook {
         PoolId indexed poolId, address indexed lp, Tranche tranche, uint256 principal, uint160 sqrtPriceEntryX96
     );
     event PositionClosed(
-        PoolId indexed poolId, address indexed lp, Tranche tranche, uint256 realizedIlWad, uint256 lossBorne, uint256 payout
+        PoolId indexed poolId,
+        address indexed lp,
+        Tranche tranche,
+        uint256 realizedIlWad,
+        uint256 lossBorne,
+        uint256 payout
     );
     event WaterfallApplied(PoolId indexed poolId, uint256 totalIl, uint256 absorbedByJunior, uint256 residualToSenior);
     event FeesAccrued(PoolId indexed poolId, uint256 toJunior, uint256 toSenior);
@@ -285,9 +290,8 @@ contract TrancheHook is BaseHook {
             uint256 residual = ilLoss > absorbed ? ilLoss - absorbed : 0;
             lossBorne = residual;
 
-            uint256 feeShare = acct.seniorPrincipalTotal == 0
-                ? 0
-                : (acct.seniorFeeClaim * pos.principal) / acct.seniorPrincipalTotal;
+            uint256 feeShare =
+                acct.seniorPrincipalTotal == 0 ? 0 : (acct.seniorFeeClaim * pos.principal) / acct.seniorPrincipalTotal;
             acct.seniorFeeClaim -= feeShare;
 
             fundPayout = absorbed + feeShare; // 保護分 + 手数料取り分
@@ -298,9 +302,8 @@ contract TrancheHook is BaseHook {
             // Junior: 自身の IL はプール退出で normal に実現（hook は補填しない）。
             // fund からは「残った取り分(= α手数料 − 肩代わり後)」をシェア按分で受け取る。
             lossBorne = ilLoss;
-            uint256 feeShare = acct.juniorPrincipalTotal == 0
-                ? 0
-                : (acct.juniorFundClaim * pos.principal) / acct.juniorPrincipalTotal;
+            uint256 feeShare =
+                acct.juniorPrincipalTotal == 0 ? 0 : (acct.juniorFundClaim * pos.principal) / acct.juniorPrincipalTotal;
             acct.juniorFundClaim -= feeShare;
 
             fundPayout = feeShare;

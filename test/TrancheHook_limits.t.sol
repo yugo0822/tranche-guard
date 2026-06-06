@@ -26,7 +26,7 @@ contract TrancheHookLimitsTest is Test, Deployers {
     using StateLibrary for IPoolManager;
 
     uint256 constant BUFFER_WAD = 0.05e18; // 5%
-    uint256 constant ALPHA_WAD = 0.70e18;
+    uint256 constant ALPHA_WAD = 0.7e18;
     uint256 constant WAD = 1e18;
 
     address juniorLp = makeAddr("juniorLp");
@@ -43,7 +43,7 @@ contract TrancheHookLimitsTest is Test, Deployers {
     ///   fund は潤沢にして「fund 不足ではなく buffer で頭打ち」を保証する。
     function test_limit_ilExceedsBuffer_seniorBearsResidual() public {
         // 手数料を厚め(20%)にして fund を潤沢に → 頭打ちは buffer 側で起きるようにする
-        (TrancheHook hook, PoolKey memory key, PoolId poolId) = _deploy(0.20e18);
+        (TrancheHook hook, PoolKey memory key, PoolId poolId) = _deploy(0.2e18);
 
         // 狭めレンジ + 大きいスワップで IL を 5% 超に押し上げる
         _addLiq(hook, key, juniorLp, TrancheHook.Tranche.JUNIOR, 10 ether, -6000, 6000);
@@ -150,23 +150,37 @@ contract TrancheHookLimitsTest is Test, Deployers {
     }
 
     function _addLiq(
-        TrancheHook, PoolKey memory key, address lp, TrancheHook.Tranche tranche, uint256 principal,
-        int24 tickLower, int24 tickUpper
+        TrancheHook,
+        PoolKey memory key,
+        address lp,
+        TrancheHook.Tranche tranche,
+        uint256 principal,
+        int24 tickLower,
+        int24 tickUpper
     ) internal {
         modifyLiquidityRouter.modifyLiquidity(
             key,
-            ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: int256(principal), salt: 0}),
+            ModifyLiquidityParams({
+                tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: int256(principal), salt: 0
+            }),
             abi.encode(lp, tranche, principal)
         );
     }
 
     function _removeLiq(
-        TrancheHook, PoolKey memory key, address lp, TrancheHook.Tranche tranche, uint256 principal,
-        int24 tickLower, int24 tickUpper
+        TrancheHook,
+        PoolKey memory key,
+        address lp,
+        TrancheHook.Tranche tranche,
+        uint256 principal,
+        int24 tickLower,
+        int24 tickUpper
     ) internal {
         modifyLiquidityRouter.modifyLiquidity(
             key,
-            ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: -int256(principal), salt: 0}),
+            ModifyLiquidityParams({
+                tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: -int256(principal), salt: 0
+            }),
             abi.encode(lp, tranche, principal)
         );
     }

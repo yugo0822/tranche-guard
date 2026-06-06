@@ -32,8 +32,8 @@ contract TrancheHookTest is Test, Deployers {
 
     // パラメータ（テストで効果が見えるよう手数料率は高め）
     uint256 constant BUFFER_WAD = 0.05e18; // 5%
-    uint256 constant ALPHA_WAD = 0.70e18; // Junior 70% / Senior 30%
-    uint256 constant HOOK_FEE_WAD = 0.10e18; // 出力の 10%（テストで fund を厚く貯め保護を見せるため。本番はもっと小さい）
+    uint256 constant ALPHA_WAD = 0.7e18; // Junior 70% / Senior 30%
+    uint256 constant HOOK_FEE_WAD = 0.1e18; // 出力の 10%（テストで fund を厚く貯め保護を見せるため。本番はもっと小さい）
 
     // トランチ別 LP（hookData の識別子。実トークンの流れとは別）
     address juniorLp = makeAddr("juniorLp");
@@ -81,9 +81,7 @@ contract TrancheHookTest is Test, Deployers {
         assertGt(aft.fundBalance, 0, "[V2] fund did not grow -> take/return-delta sign wrong");
 
         // 2) hook の現物 currency1 残高が fund と一致（claims=false で実トークン化できている）
-        assertEq(
-            currency1.balanceOf(address(hook)) - hookBal0, aft.fundBalance, "[V2] held tokens != fund ledger"
-        );
+        assertEq(currency1.balanceOf(address(hook)) - hookBal0, aft.fundBalance, "[V2] held tokens != fund ledger");
 
         // 3) α 配分が正しい（juniorFundClaim : seniorFeeClaim = α : 1-α）
         assertApproxEqRel(
@@ -98,7 +96,7 @@ contract TrancheHookTest is Test, Deployers {
 
     /* ───────────────────────── tick 範囲の保存 ───────────────────────── */
 
-    function test_position_storesTickRange() public view{
+    function test_position_storesTickRange() public view {
         TrancheHook.LpPosition memory pos = hook.getPosition(poolId, juniorLp);
         assertEq(pos.tickLower, int24(-887220), "tickLower not stored");
         assertEq(pos.tickUpper, int24(887220), "tickUpper not stored");
