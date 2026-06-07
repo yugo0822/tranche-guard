@@ -33,7 +33,7 @@ contract TrancheHookTest is Test, Deployers {
     // パラメータ（テストで効果が見えるよう手数料率は高め）
     uint256 constant BUFFER_WAD = 0.05e18; // 5%
     uint256 constant ALPHA_WAD = 0.7e18; // Junior 70% / Senior 30%
-    uint256 constant HOOK_FEE_WAD = 0.1e18; // 出力の 10%（テストで fund を厚く貯め保護を見せるため。本番はもっと小さい）
+    uint256 constant HOOK_FEE_WAD = 0.01e18; // 出力の 10%（テストで fund を厚く貯め保護を見せるため。本番はもっと小さい）
 
     // トランチ別 LP（hookData の識別子。実トークンの流れとは別）
     address juniorLp = makeAddr("juniorLp");
