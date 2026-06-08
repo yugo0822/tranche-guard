@@ -32,10 +32,16 @@ import {ILMath} from "./ILMath.sol";
 /// 成立条件（オフチェーンで連立して (B, α) を算出し注入）:
 ///   ΔL(B) < F のとき  α = ΔL/(2F) + 0.5
 ///
+/// IL 損失の基準（FIX[#3]）:
+///   ilWad は「current HODL に対する損失比率」なので、損失額は entry 価値ではなく
+///   current HODL 価値 V_HODL_cur で評価する: ilLoss = ilWad × V_HODL_cur。
+///   V_HODL_cur = entry 数量(amount0, amount1) を current(EMA) 価格で再評価。
+///   これで MC の ratio 比較(ilWad vs B)と完全整合し、注入した (B,α) がオンチェーン挙動に対応する。
+///
 /// 簡略化（明示）:
 ///   - fund / IL は単一通貨 currency1 で会計（cross-currency 変換は TODO）。
-///   - 1 LP = 1 position。
-///   - auth は hookData 信頼。本番は PositionManager の owner 参照が必要。
+///   - 1 LP = 1 position、かつ remove は「登録レンジ・全量」のみ（FIX[#1] で強制）。
+///   - auth は sender == lp（FIX[auth]）。本番の custodial ルーター(共有)対応は PositionManager の ownerOf 委譲。
 ///
 /// ─────────────────────────────────────────────────────────────────────────
 contract TrancheHook is BaseHook {
@@ -52,7 +58,10 @@ contract TrancheHook is BaseHook {
     struct LpPosition {
         address owner;
         Tranche tranche;
-        uint256 principal;
+        uint128 amount0; // FIX[#3]: entry 数量（V_HODL_current 評価用）
+        uint128 amount1; // FIX[#3]: entry 数量
+        uint128 liquidity; // FIX[#1]: 登録時の L（フルクローズ検証用）
+        uint256 principal; // entry token1 価値（fee 按分の重み）
         uint160 sqrtPriceEntryX96;
         int24 tickLower;
         int24 tickUpper;
@@ -106,10 +115,18 @@ contract TrancheHook is BaseHook {
     error PositionInactive();
     error PositionAlreadyActive();
     error Unauthorized();
+    error RangeMismatch();
+    error PartialCloseNotAllowed();
+    error InvalidParam();
+    error FundInvariantBroken();
 
     /* ───────────────────────── 構築 ───────────────────────── */
 
     constructor(IPoolManager _manager, uint256 _bufferWad, uint256 _alphaWad, uint256 _hookFeeWad) BaseHook(_manager) {
+        // ALPHA_WAD > WAD → toSenior = fee - toJunior が underflow して swap 全断。
+        // HOOK_FEE_WAD > WAD → fee > outAbs となり PoolManager のバランスチェックで swap 全断。
+        // BUFFER_WAD > WAD → bufferAmount > vHodlCur で経済的に不正（IL 全量を常に補填）。
+        if (_alphaWad > WAD || _hookFeeWad > WAD || _bufferWad > WAD) revert InvalidParam();
         BUFFER_WAD = _bufferWad;
         ALPHA_WAD = _alphaWad;
         HOOK_FEE_WAD = _hookFeeWad;
@@ -138,16 +155,16 @@ contract TrancheHook is BaseHook {
 
     /* ───────────────────────── hookData ───────────────────────── */
 
-    function encodeHookData(address lp, Tranche tranche, uint256 principal) external pure returns (bytes memory) {
-        return abi.encode(lp, tranche, principal);
+    function encodeHookData(address lp, Tranche tranche) external pure returns (bytes memory) {
+        return abi.encode(lp, tranche);
     }
 
     function _decodeHookData(bytes calldata hookData)
         internal
         pure
-        returns (address lp, Tranche tranche, uint256 principal)
+        returns (address lp, Tranche tranche)
     {
-        (lp, tranche, principal) = abi.decode(hookData, (address, Tranche, uint256));
+        (lp, tranche) = abi.decode(hookData, (address, Tranche));
     }
 
     /* ───────────────────────── afterAddLiquidity: 登録 ───────────────────────── */
@@ -164,15 +181,16 @@ contract TrancheHook is BaseHook {
             return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
-        (address lp, Tranche tranche,) = _decodeHookData(hookData);
-        if (lp != sender) revert Unauthorized(); 
-        // TODO[auth]: 本番の custodial ルーター(共有)対応は PositionManager の ownerOf 委譲（roadmap）。
+        (address lp, Tranche tranche) = _decodeHookData(hookData);
+        if (lp != sender) revert Unauthorized();
+        // FIX[auth]: lp == sender を強制。custodial ルーター(共有)対応は PositionManager の ownerOf 委譲（roadmap）。
 
         PoolId poolId = key.toId();
         if (positions[poolId][lp].active) revert PositionAlreadyActive();
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
+        // FIX[②]: principal は PoolManager 由来の delta（実預入量）を entry 価格で token1 評価。
         int128 d0 = delta.amount0();
         int128 d1 = delta.amount1();
         uint256 amt0 = d0 < 0 ? uint256(uint128(-d0)) : 0;
@@ -182,6 +200,9 @@ contract TrancheHook is BaseHook {
         positions[poolId][lp] = LpPosition({
             owner: lp,
             tranche: tranche,
+            amount0: uint128(amt0), // FIX[#3]: V_HODL_cur 評価のため entry 数量を保存
+            amount1: uint128(amt1), // FIX[#3]
+            liquidity: uint128(uint256(params.liquidityDelta)), // FIX[#1]: フルクローズ検証用
             principal: principal,
             sqrtPriceEntryX96: sqrtPriceX96,
             tickLower: params.tickLower,
@@ -245,7 +266,7 @@ contract TrancheHook is BaseHook {
     function _afterRemoveLiquidity(
         address sender,
         PoolKey calldata key,
-        ModifyLiquidityParams calldata,
+        ModifyLiquidityParams calldata params,
         BalanceDelta,
         BalanceDelta,
         bytes calldata hookData
@@ -254,14 +275,20 @@ contract TrancheHook is BaseHook {
             return (BaseHook.afterRemoveLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
         }
 
-        (address lp,,) = _decodeHookData(hookData);
-        if (lp != sender) revert Unauthorized(); 
-        
+        (address lp,) = _decodeHookData(hookData);
+        if (lp != sender) revert Unauthorized();
+
         PoolId poolId = key.toId();
         LpPosition storage pos = positions[poolId][lp];
 
         if (pos.owner == address(0)) revert NoPosition();
         if (!pos.active) revert PositionInactive();
+
+        // FIX[#1]: remove は登録時と同じレンジ・全量でなければならない。
+        //   部分 remove / 別レンジ remove で「フル principal の保護を払い出して active=false」される
+        //   過剰決済 → fund ドレインを封じる。MVP の「1 LP = 1 position・フルクローズ」前提を強制。
+        if (params.tickLower != pos.tickLower || params.tickUpper != pos.tickUpper) revert RangeMismatch();
+        if (uint256(-params.liquidityDelta) != pos.liquidity) revert PartialCloseNotAllowed();
 
         PoolAccount storage acct = poolAccounts[poolId];
 
@@ -271,14 +298,17 @@ contract TrancheHook is BaseHook {
             TickMath.getSqrtPriceAtTick(pos.tickLower),
             TickMath.getSqrtPriceAtTick(pos.tickUpper)
         );
-        uint256 ilLoss = ILMath.ilAmount(pos.principal, ilWad);
+        // FIX[#3]: ilWad は current HODL 比率なので、entry 価値(principal)ではなく current HODL 価値で評価。
+        //   ilWad と同じ価格(EMA)で entry 数量を再評価 → 真の絶対 IL。MC の ratio 比較とも整合。
+        uint256 vHodlCur = ILMath.depositValueInToken1(pos.amount0, pos.amount1, acct.sqrtPriceEmaX96);
+        uint256 ilLoss = ILMath.ilAmount(vHodlCur, ilWad);
 
         uint256 lossBorne;
         uint256 fundPayout; // fund から LP に渡す currency1 額
 
         if (pos.tranche == Tranche.SENIOR) {
-            // 保護: buffer まで Junior(fund) が肩代わり
-            uint256 bufferAmount = ILMath.ilAmount(pos.principal, BUFFER_WAD);
+            // 保護: buffer まで Junior(fund) が肩代わり（buffer も current HODL の B%）
+            uint256 bufferAmount = ILMath.ilAmount(vHodlCur, BUFFER_WAD); // FIX[#3]
             uint256 absorbed = ilLoss <= bufferAmount ? ilLoss : bufferAmount;
             if (absorbed > acct.juniorFundClaim) absorbed = acct.juniorFundClaim;
             acct.juniorFundClaim -= absorbed;
@@ -306,15 +336,19 @@ contract TrancheHook is BaseHook {
             acct.juniorPrincipalTotal -= _min(pos.principal, acct.juniorPrincipalTotal);
         }
 
-        // ── 実決済: fund → LP へ currency1 を支払う ──
+        pos.active = false;
+
+        // ── 実決済: fund → LP へ currency1 を支払う（Interaction 最後）──
+        // 不変条件 juniorFundClaim + seniorFeeClaim == fundBalance が保たれる限り
+        // fundBalance >= fundPayout は常に真。偽は別バグによる不変条件崩壊 → fail-loud。
+        if (fundPayout > acct.fundBalance) revert FundInvariantBroken();
         BalanceDelta hookDelta = BalanceDeltaLibrary.ZERO_DELTA;
-        if (fundPayout > 0 && acct.fundBalance >= fundPayout) {
+        if (fundPayout > 0) {
             acct.fundBalance -= fundPayout;
-            key.currency1.settle(poolManager, address(this), fundPayout, false);
+            key.currency1.settle(poolManager, address(this), fundPayout, false); // interaction
             hookDelta = toBalanceDelta(0, -int128(uint128(fundPayout)));
         }
 
-        pos.active = false;
         emit PositionClosed(poolId, lp, pos.tranche, ilWad, lossBorne, fundPayout);
 
         return (BaseHook.afterRemoveLiquidity.selector, hookDelta);
@@ -338,13 +372,16 @@ contract TrancheHook is BaseHook {
     function quoteRealizedIl(PoolId poolId, address lp) external view returns (uint256 ilWad, uint256 ilLoss) {
         LpPosition memory pos = positions[poolId][lp];
         if (pos.owner == address(0) || !pos.active) return (0, 0);
+        uint160 emaP = poolAccounts[poolId].sqrtPriceEmaX96;
         ilWad = ILMath.ilFromSqrtPrices(
             pos.sqrtPriceEntryX96,
-            poolAccounts[poolId].sqrtPriceEmaX96,
+            emaP,
             TickMath.getSqrtPriceAtTick(pos.tickLower),
             TickMath.getSqrtPriceAtTick(pos.tickUpper)
         );
-        ilLoss = ILMath.ilAmount(pos.principal, ilWad);
+        // FIX[#3]: current HODL 価値でスケール（entry の principal ではなく）。
+        uint256 vHodlCur = ILMath.depositValueInToken1(pos.amount0, pos.amount1, emaP);
+        ilLoss = ILMath.ilAmount(vHodlCur, ilWad);
     }
 
     function getPosition(PoolId poolId, address lp) external view returns (LpPosition memory) {

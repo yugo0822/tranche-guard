@@ -21,6 +21,7 @@ import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 
 import {TrancheHook} from "../src/TrancheHook.sol";
+import {ILMath} from "../src/ILMath.sol"; // FIX[#3]: hook と同一式で V_HODL_cur / buffer を出すため
 
 /// @notice per-LP ルーター方式の共有テスト基盤。
 ///
@@ -83,7 +84,7 @@ abstract contract TrancheTestBase is Test, Deployers {
         lpRouter.modifyLiquidity(
             key,
             ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: int256(liq), salt: 0}),
-            abi.encode(address(lpRouter), tranche, liq)
+            abi.encode(address(lpRouter), tranche)
         );
     }
 
@@ -99,7 +100,7 @@ abstract contract TrancheTestBase is Test, Deployers {
         lpRouter.modifyLiquidity(
             key,
             ModifyLiquidityParams({tickLower: tickLower, tickUpper: tickUpper, liquidityDelta: -int256(liq), salt: 0}),
-            abi.encode(address(lpRouter), tranche, liq)
+            abi.encode(address(lpRouter), tranche)
         );
     }
 
@@ -120,5 +121,14 @@ abstract contract TrancheTestBase is Test, Deployers {
     function _min3(uint256 a, uint256 b, uint256 c) internal pure returns (uint256) {
         uint256 m = a < b ? a : b;
         return m < c ? m : c;
+    }
+
+    /// @dev FIX[#3]: hook と同一式で current HODL 価値を出す（ilLoss / buffer のスケール基準）。
+    ///   hook は退出時に entry 数量(amount0, amount1)を EMA 価格で再評価する。テストの期待値も同じ式で出す。
+    ///   remove は EMA を動かさないので、remove 前後どちらで呼んでも同値（amount0/1 も active=false 後も残る）。
+    function _vHodlCurrent(TrancheHook hook, PoolId poolId, address lp) internal view returns (uint256) {
+        TrancheHook.LpPosition memory pos = hook.getPosition(poolId, lp);
+        uint160 emaP = hook.getPoolAccount(poolId).sqrtPriceEmaX96;
+        return ILMath.depositValueInToken1(pos.amount0, pos.amount1, emaP);
     }
 }

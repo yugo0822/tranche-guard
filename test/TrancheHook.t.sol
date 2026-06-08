@@ -149,8 +149,9 @@ contract TrancheHookTest is TrancheTestBase {
         assertLt(residual, ilLoss, "senior bore full IL -> not protected");
 
         // 4c) absorbed は過不足なく min(IL, buffer, fund)
-        uint256 principal = hook.getPosition(poolId, address(seniorRouter)).principal;
-        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
+        //     FIX[#3]: buffer も hook と同じ current HODL 基準で計算（entry principal ではない）
+        uint256 vHodlCur = _vHodlCurrent(hook, poolId, address(seniorRouter));
+        uint256 bufferAmount = ILMath.ilAmount(vHodlCur, BUFFER_WAD);
         uint256 expectedAbsorbed = _min3(ilLoss, bufferAmount, bef.juniorFundClaim);
         assertEq(absorbed, expectedAbsorbed, "absorbed != min(IL, buffer, fund)");
 
@@ -168,12 +169,14 @@ contract TrancheHookTest is TrancheTestBase {
         PoolModifyLiquidityTest attacker = _newLp();
         address victim = makeAddr("victim"); // active な position は持たない
 
-        // ⚠️ selector 参照が版で通らなければ vm.expectRevert(); （bare）にフォールバック
+        // v4 は hook の revert を WrappedError で包む（トップレベルは素の Unauthorized() にならない）。
+        //   内側 selector 0x82b42900 == Unauthorized() であることは trace で確認済み。
+        //   fresh victim なので revert 経路は auth だけ → bare expectRevert で十分かつ堅牢。
         vm.expectRevert();
         attacker.modifyLiquidity(
             poolKey,
             ModifyLiquidityParams({tickLower: TL, tickUpper: TU, liquidityDelta: int256(1 ether), salt: 0}),
-            abi.encode(victim, TrancheHook.Tranche.JUNIOR, uint256(1 ether))
+            abi.encode(victim, TrancheHook.Tranche.JUNIOR)
         );
     }
 }

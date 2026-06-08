@@ -22,7 +22,7 @@ contract TrancheHookLimitsTest is TrancheTestBase {
     using StateLibrary for IPoolManager;
 
     uint256 constant BUFFER_WAD = 0.05e18; // 5%
-    uint256 constant ALPHA_WAD = 0.70e18;
+    uint256 constant ALPHA_WAD = 0.7e18;
 
     // トランチ別 LP = 専用ルーター（setUp で生成、各 test で使い回す）
     PoolModifyLiquidityTest juniorRouter;
@@ -41,20 +41,23 @@ contract TrancheHookLimitsTest is TrancheTestBase {
     ///   fund は潤沢にして「fund 不足ではなく buffer で頭打ち」を保証する。
     function test_limit_ilExceedsBuffer_seniorBearsResidual() public {
         // 手数料を厚め(20%)にして fund を潤沢に → 頭打ちは buffer 側で起きるようにする
-        (TrancheHook hook, PoolKey memory key, PoolId poolId) = _deployHookAndPool(BUFFER_WAD, ALPHA_WAD, 0.20e18);
+        (TrancheHook hook, PoolKey memory key, PoolId poolId) = _deployHookAndPool(BUFFER_WAD, ALPHA_WAD, 0.2e18);
 
         // 狭めレンジ(±6000) + 大きいスワップで IL を 5% 超に押し上げる
         _addLiq(juniorRouter, key, TrancheHook.Tranche.JUNIOR, 10 ether, -6000, 6000);
         _addLiq(seniorRouter, key, TrancheHook.Tranche.SENIOR, 10 ether, -6000, 6000);
 
-        // 価格を大きく動かす（IL を稼ぐ）
-        for (uint256 i = 0; i < 20; i++) {
-            _swap(key, true, 0.3 ether);
+        // 価格を大きく動かして IL を稼ぐ。±6000 のエッジ容量は token0 で約 6.98 ether
+        //   (L_total=2e19, L·(1/√0.5488−1)=0.349L)。回数を増やし1回を小さくして EMA ラグを潰しつつ
+        //   合計 6 ether（< 6.98）でエッジ近傍(価格~0.6, spot IL~12%)まで押す → 登録 IL が 5% buffer 超え。
+        //   ・IL <= buffer のまま → 回数を増やす（ただし合計 ~6.9 ether 超で PriceLimitAlreadyExceeded）
+        for (uint256 i = 0; i < 30; i++) {
+            _swap(key, true, 0.2 ether);
         }
 
         (, uint256 ilLoss) = hook.quoteRealizedIl(poolId, address(seniorRouter));
-        uint256 principal = hook.getPosition(poolId, address(seniorRouter)).principal;
-        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
+        // FIX[#3]: buffer も hook と同じ current HODL 基準
+        uint256 bufferAmount = ILMath.ilAmount(_vHodlCurrent(hook, poolId, address(seniorRouter)), BUFFER_WAD);
 
         // 前提: IL が buffer を超えていること（超えていなければスワップ量/レンジ調整の合図）
         assertGt(ilLoss, bufferAmount, "IL <= buffer -> widen price move (more/bigger swaps, narrower range)");
@@ -103,8 +106,8 @@ contract TrancheHookLimitsTest is TrancheTestBase {
         assertGt(ilLoss, 0, "no IL created");
 
         TrancheHook.PoolAccount memory bef = hook.getPoolAccount(poolId);
-        uint256 principal = hook.getPosition(poolId, address(seniorRouter)).principal;
-        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD);
+        // FIX[#3]: buffer も hook と同じ current HODL 基準
+        uint256 bufferAmount = ILMath.ilAmount(_vHodlCurrent(hook, poolId, address(seniorRouter)), BUFFER_WAD);
 
         // 前提: fund が「IL と buffer の両方」より小さい → fund 側で頭打ちになる状況
         assertLt(bef.juniorFundClaim, ilLoss, "fund not the binding constraint vs IL");

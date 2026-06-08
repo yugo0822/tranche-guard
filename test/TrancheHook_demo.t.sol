@@ -102,8 +102,9 @@ contract TrancheHookDemoTest is TrancheTestBase {
         );
 
         // ── 4) Senior 退出 → 保護経路が走る ──
-        uint256 principal = hook.getPosition(poolId, address(seniorRouter)).principal;
-        uint256 bufferAmount = ILMath.ilAmount(principal, BUFFER_WAD); // hook と同一式
+        uint256 principal = hook.getPosition(poolId, address(seniorRouter)).principal; // ログ用（entry 預入価値）
+        uint256 vHodlCur = _vHodlCurrent(hook, poolId, address(seniorRouter)); // FIX[#3]
+        uint256 bufferAmount = ILMath.ilAmount(vHodlCur, BUFFER_WAD); // hook と同一式（current HODL 基準）
         _removeLiq(seniorRouter, poolKey, TrancheHook.Tranche.SENIOR, 10 ether, TL, TU);
 
         TrancheHook.PoolAccount memory aft = hook.getPoolAccount(poolId);
