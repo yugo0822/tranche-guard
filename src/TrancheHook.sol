@@ -37,10 +37,6 @@ import {ILMath} from "./ILMath.sol";
 ///   - 1 LP = 1 position。
 ///   - auth は hookData 信頼。本番は PositionManager の owner 参照が必要。
 ///
-/// ⚠️要検証の境界（forge build で一緒に潰す）:
-///   [V2] afterSwapReturnDelta の符号と take() の組み合わせ（手数料捕捉）
-///   [V3] afterRemoveLiquidityReturnDelta の符号と settle()（fund→LP 支払い）
-///   [V4] BaseHook の各 _afterXxx オーバーライド署名（commit 依存）
 /// ─────────────────────────────────────────────────────────────────────────
 contract TrancheHook is BaseHook {
     using StateLibrary for IPoolManager;
@@ -157,7 +153,7 @@ contract TrancheHook is BaseHook {
     /* ───────────────────────── afterAddLiquidity: 登録 ───────────────────────── */
 
     function _afterAddLiquidity(
-        address,
+        address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata params,
         BalanceDelta delta,
@@ -169,7 +165,8 @@ contract TrancheHook is BaseHook {
         }
 
         (address lp, Tranche tranche,) = _decodeHookData(hookData);
-        // TODO[auth]: lp は hookData 由来で詐称可能。本番は PositionManager の owner と突合する。
+        if (lp != sender) revert Unauthorized(); 
+        // TODO[auth]: 本番の custodial ルーター(共有)対応は PositionManager の ownerOf 委譲（roadmap）。
 
         PoolId poolId = key.toId();
         if (positions[poolId][lp].active) revert PositionAlreadyActive();
@@ -220,8 +217,6 @@ contract TrancheHook is BaseHook {
         acct.sqrtPriceEmaX96 = _updateEma(acct.sqrtPriceEmaX96, sqrtPriceX96);
 
         // ── 手数料捕捉（fund の原資） ──
-        // ⚠️[V2]: 「currency1 が unspecified の時だけ」捕捉する簡略版。
-        //   exactInput/exactOutput と zeroForOne の組合せで unspecified が変わる点は要検証。
         int128 hookFee = 0;
         if (params.zeroForOne) {
             int128 out1 = delta.amount1();
@@ -229,7 +224,6 @@ contract TrancheHook is BaseHook {
             uint256 fee = (outAbs * HOOK_FEE_WAD) / WAD;
 
             if (fee > 0) {
-                // ⚠️[V2]: 正の hookDelta を返して取り分を主張し、take() で実トークン化。
                 hookFee = int128(uint128(fee));
                 key.currency1.take(poolManager, address(this), fee, false);
 
@@ -249,7 +243,7 @@ contract TrancheHook is BaseHook {
     /* ───────────────────────── afterRemoveLiquidity: 充当 + 実決済 ───────────────────────── */
 
     function _afterRemoveLiquidity(
-        address,
+        address sender,
         PoolKey calldata key,
         ModifyLiquidityParams calldata,
         BalanceDelta,
@@ -261,6 +255,8 @@ contract TrancheHook is BaseHook {
         }
 
         (address lp,,) = _decodeHookData(hookData);
+        if (lp != sender) revert Unauthorized(); 
+        
         PoolId poolId = key.toId();
         LpPosition storage pos = positions[poolId][lp];
 
@@ -311,7 +307,6 @@ contract TrancheHook is BaseHook {
         }
 
         // ── 実決済: fund → LP へ currency1 を支払う ──
-        // ⚠️[V3]: 負の delta = hook が user に支払う、の符号で合っているか要検証。
         BalanceDelta hookDelta = BalanceDeltaLibrary.ZERO_DELTA;
         if (fundPayout > 0 && acct.fundBalance >= fundPayout) {
             acct.fundBalance -= fundPayout;
