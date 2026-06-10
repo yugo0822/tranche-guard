@@ -4,66 +4,63 @@ pragma solidity ^0.8.26;
 import {FullMath} from "v4-core/libraries/FullMath.sol";
 
 /// @title ILMath
-/// @notice 集中流動性(concentrated liquidity)に対応した IL 計算ライブラリ。
-/// @dev Uniswap v2 の full range 公式は集中流動性では IL を大幅に過小評価する。
-///      本ライブラリは tickLower/tickUpper のレンジを考慮し、レンジアウトも正しく扱う。
-///      すべての割合は WAD (1e18 = 100%)。
+/// @notice Impermanent loss library for concentrated liquidity positions.
+/// @dev The Uniswap v2 full-range formula severely underestimates IL for concentrated positions.
+///      This library accounts for the tick range and handles out-of-range correctly.
+///      All ratios are in WAD (1e18 = 100%).
 ///
-/// 数学的背景:
-///   流動性 L、レンジ [P_L, P_U]、現在価格 P でのトークン量 (token0=x, token1=y):
-///     P <= P_L          : x = L(1/√P_L − 1/√P_U),  y = 0
-///     P_L <= P <= P_U   : x = L(1/√P   − 1/√P_U),  y = L(√P − √P_L)
-///     P >= P_U          : x = 0,                    y = L(√P_U − √P_L)
-///   token1 建て価値: V = x·P + y    (P = token1/token0)
+/// Math background (L = liquidity, range [P_L, P_U], current price P):
+///   P <= P_L  : x = L(1/√P_L − 1/√P_U),  y = 0
+///   P_L<P<P_U : x = L(1/√P   − 1/√P_U),  y = L(√P − √P_L)
+///   P >= P_U  : x = 0,                    y = L(√P_U − √P_L)
+///   token1-denominated value: V = x·P + y
 ///
-///   HODL 価値:  entry 時のトークン量 (x0,y0) を current 価格で評価 = x0·P_cur + y0
+///   HODL value: entry amounts (x0, y0) re-valued at current price = x0·P_cur + y0
 ///   IL = 1 − V_lp(P_cur) / V_hodl(P_cur)
 ///
-///   sqrtPriceX96 (= √P · 2^96) を直接使う。L は IL の比の中で相殺されるため L = 2^96 と置く。
-///   ※ 重要: トークン量はレンジ端でクランプ(数量固定)するが、価値評価は必ず現在価格で行う。
+///   sqrtPriceX96 (= √P · 2^96) is used directly.
+///   L cancels in the IL ratio, so L = 2^96 (= Q96) is substituted throughout.
+///   Token quantities are clamped to range endpoints, but value is always evaluated at the current price.
 library ILMath {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant Q96 = 0x1000000000000000000000000; // 2^96
 
-    /// @notice token1 建てのポジション価値を返す（L = Q96 固定、相対値）。
-    /// @dev トークン量はレンジ内にクランプした価格で決める（レンジアウト時の数量固定）。
-    ///      ただし token0 の価値評価は必ず現在価格 sqrtPEval で行う（数量固定 != 価値固定）。
-    /// @param sqrtPClamp トークン量決定用の価格（内部でレンジ内にクランプ）
-    /// @param sqrtPEval  価値評価に使う現在価格の sqrtPriceX96
-    /// @param sqrtPL     レンジ下限の sqrtPriceX96
-    /// @param sqrtPU     レンジ上限の sqrtPriceX96
-    /// @return value     token1 建て価値（スケール: Q96）
+    /// @notice Returns the token1-denominated position value (L = Q96, relative scale).
+    /// @dev Token quantities are determined by clamping sqrtPClamp into [sqrtPL, sqrtPU].
+    ///      token0 value is always evaluated at sqrtPEval (the caller's current price),
+    ///      not at the clamped price — clamping fixes quantities, not values.
+    /// @param sqrtPClamp Price used to determine token quantities (clamped internally).
+    /// @param sqrtPEval  Current sqrtPriceX96 used to value token0.
+    /// @param sqrtPL     Range lower bound sqrtPriceX96.
+    /// @param sqrtPU     Range upper bound sqrtPriceX96.
+    /// @return value     token1-denominated value (Q96 scale).
     function _positionValue(uint256 sqrtPClamp, uint256 sqrtPEval, uint256 sqrtPL, uint256 sqrtPU)
         private
         pure
         returns (uint256 value)
     {
-        // トークン量を決める価格 sp はレンジ内にクランプ（レンジ外なら端で数量固定）
         uint256 sp = sqrtPClamp;
         if (sp < sqrtPL) sp = sqrtPL;
         if (sp > sqrtPU) sp = sqrtPU;
 
-        // token1量 y (Q96スケール) = (sp − sqrtPL)
         uint256 y = sp - sqrtPL;
-
-        // token0量 x (Q96スケール) = Q96^2·(sqrtPU − sp) / (sp·sqrtPU)
         uint256 xNum = FullMath.mulDiv(Q96, sqrtPU - sp, sqrtPU);
         uint256 x = FullMath.mulDiv(xNum, Q96, sp);
 
-        // token0 の価値は「現在価格」で評価する: x · P_eval, P_eval = sqrtPEval^2/Q96^2
-        // ここでは sp(数量決定価格) == sqrtPEval(評価価格) なので、x が大きいとき sqrtPEval は小さく、
-        // 逆も成り立つため xP は spU 程度に有界で overflow しない（数量価格==評価価格が効く）。
+        // x · P_eval = x · sqrtPEval² / Q96².
+        // When this function is called with sp == sqrtPEval (LP value path), large x implies
+        // small sqrtPEval, so xP stays bounded near sqrtPU — no overflow.
         uint256 xP = FullMath.mulDiv(x, sqrtPEval, Q96);
         xP = FullMath.mulDiv(xP, sqrtPEval, Q96);
 
         value = xP + y;
     }
 
-    /// @notice 集中流動性ポジションの実現 IL 割合 (WAD) を返す。
-    /// @param sqrtPriceEntryX96 加入時価格
-    /// @param sqrtPriceCurrentX96 現在価格
-    /// @param sqrtPriceLowerX96 レンジ下限
-    /// @param sqrtPriceUpperX96 レンジ上限
+    /// @notice Returns the realized IL ratio (WAD) for a concentrated liquidity position.
+    /// @param sqrtPriceEntryX96   sqrtPriceX96 at position entry.
+    /// @param sqrtPriceCurrentX96 Current sqrtPriceX96 (typically the EMA price).
+    /// @param sqrtPriceLowerX96   Range lower bound sqrtPriceX96.
+    /// @param sqrtPriceUpperX96   Range upper bound sqrtPriceX96.
     function ilFromSqrtPrices(
         uint160 sqrtPriceEntryX96,
         uint160 sqrtPriceCurrentX96,
@@ -79,41 +76,38 @@ library ILMath {
         uint256 spL = uint256(sqrtPriceLowerX96);
         uint256 spU = uint256(sqrtPriceUpperX96);
 
-        uint256 pCur = FullMath.mulDiv(spC, spC, Q96); // P_cur = spC^2/Q96 (Q96スケール)
+        uint256 pCur = FullMath.mulDiv(spC, spC, Q96); // P_cur in Q96 scale
 
-        // entry 時のトークン量（entry価格 spE をクランプして決める。数量のみ）
         uint256 spEc = spE;
         if (spEc < spL) spEc = spL;
         if (spEc > spU) spEc = spU;
-        uint256 y0 = spEc - spL; // token1量(Q96)
+        uint256 y0 = spEc - spL;
         uint256 xNum0 = FullMath.mulDiv(Q96, spU - spEc, spU);
-        uint256 x0 = FullMath.mulDiv(xNum0, Q96, spEc); // token0量(Q96)
+        uint256 x0 = FullMath.mulDiv(xNum0, Q96, spEc);
 
-        // ── HODL 価値 = x0·P_cur + y0（entry数量を現在価格で評価）──
-        //   ⚠️ 極端な乖離（entry が極低価格→token0 を大量保有 かつ current が極高価格）では
-        //      x0·pCur/Q96 が真の値として 2^256 を超え、FullMath.mulDiv が revert する。
-        //      この領域では HODL がレンジ制約の LP を天文学的に上回るため IL は 100%(WAD) に飽和する。
-        //      FullMath と同じ 512bit 高位ワード判定で overflow を厳密検知し、WAD を返す。
-        //      （逆 side: entry高→current低 は pCur→0 で x0 leg が消えるため overflow しない）
+        // HODL value = x0·P_cur + y0 (entry amounts valued at current price).
+        // When entry price is very low (large x0) and current price is very high (large pCur),
+        // x0·pCur can exceed 2^256, which would cause FullMath.mulDiv to revert.
+        // In that regime HODL dominates LP by an astronomical factor → IL saturates to 100%.
+        // Detect overflow using the same 512-bit high-word technique as FullMath.
         uint256 hodl0;
         {
-            uint256 prod0; // x0*pCur の低位 256bit
-            uint256 prod1; // x0*pCur の高位 256bit
+            uint256 prod0;
+            uint256 prod1; // high 256 bits of x0 * pCur
             assembly {
                 let mm := mulmod(x0, pCur, not(0))
                 prod0 := mul(x0, pCur)
                 prod1 := sub(sub(mm, prod0), lt(mm, prod0))
             }
-            // result = (prod1:prod0)/Q96 が uint256 に収まる条件は prod1 < Q96。
-            //   収まらない = HODL の token0 leg が 2^256 超 = LP は相対的にほぼ無価値 → IL=WAD。
+            // (prod1:prod0) / Q96 fits in uint256 iff prod1 < Q96.
+            // If it doesn't fit, the token0 HODL leg alone exceeds 2^256 → IL = WAD.
             if (prod1 >= Q96) return WAD;
             hodl0 = FullMath.mulDiv(x0, pCur, Q96);
         }
-        // hodl0 + y0 の加算 overflow も同様に IL=WAD（極端領域でのみ起こり、そこでは IL≈WAD）。
+        // Addition overflow is also possible in the same extreme regime → IL = WAD.
         if (hodl0 > type(uint256).max - y0) return WAD;
         uint256 vHodl = hodl0 + y0;
 
-        // LP 価値（数量は current でクランプ、評価は current 価格）
         uint256 vLp = _positionValue(spC, spC, spL, spU);
 
         if (vHodl == 0) return 0;
@@ -122,25 +116,22 @@ library ILMath {
         ilWad = FullMath.mulDiv(vHodl - vLp, WAD, vHodl);
     }
 
-    /// @notice IL 割合 (WAD) を元本に適用して損失額を返す。
+    /// @notice Applies an IL ratio (WAD) to a principal to get the absolute loss.
     function ilAmount(uint256 principal, uint256 ilWad) internal pure returns (uint256) {
         return FullMath.mulDiv(principal, ilWad, WAD);
     }
 
-    /// @notice 預入トークン量を entry 価格で token1 建て評価する（principal の信頼担保用）。
-    /// @dev value = amount1 + amount0 · P,  P = sqrtPriceX96² / Q96²。
-    ///      hookData の自己申告ではなく PoolManager 由来の実 delta から principal を出すことで、
-    ///      principal 水増しによる手数料按分/保護のドレインを封じる。
-    ///      fund(currency1) とウォーターフォールの次元を揃えるため token1 建てにする。
-    ///      これは同時に HODL 基準額（entry 数量を current で評価する分母）の entry 時点の値でもある。
+    /// @notice Values deposited token amounts in token1 at the given entry price.
+    /// @dev Derives principal from the actual PoolManager delta rather than self-reported hookData,
+    ///      preventing principal inflation attacks on fee pro-rata and protection payouts.
+    ///      token1-denomination aligns with the currency1-denominated fund and waterfall.
+    ///      value = amount1 + amount0 · P,  where P = sqrtPriceX96² / Q96².
     function depositValueInToken1(uint256 amount0, uint256 amount1, uint160 sqrtPriceX96)
         internal
         pure
         returns (uint256)
     {
-        // p = sqrtP² / Q96  (= P · Q96, Q96スケールの価格)
         uint256 p = FullMath.mulDiv(uint256(sqrtPriceX96), uint256(sqrtPriceX96), Q96);
-        // amount0 · P = amount0 · p / Q96
         return amount1 + FullMath.mulDiv(amount0, p, Q96);
     }
 }

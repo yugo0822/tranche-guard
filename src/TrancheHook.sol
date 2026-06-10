@@ -19,36 +19,35 @@ import {CurrencySettler} from "@uniswap/v4-core/test/utils/CurrencySettler.sol";
 import {ILMath} from "./ILMath.sol";
 
 /// @title TrancheHook
-/// @notice Senior / Junior の2トランチで IL をウォーターフォール充当する Uniswap v4 hook。
+/// @notice Uniswap v4 hook that absorbs IL in a two-tranche waterfall: Senior is protected up to
+///         a buffer B, with Junior capital (held in a shared fund) covering the shortfall.
 ///
-/// ─────────────────────────────────────────────────────────────────────────
-/// 経済モデル（確定）: fund 共有プールモデル
-///   - 全スワップ手数料を hook が捕捉して fund(currency1) に貯める。
-///   - α·F   → juniorFundClaim : Junior 集団の担保 兼 報酬
-///     (1−α)·F → seniorFeeClaim  : Senior の手数料取り分
-///   - Senior 保護(absorbed) は juniorFundClaim から引く → 肩代わりが Junior 全体に分散。
-///   - 退出決済は常に「fund → LP への支払い」のみ。remove 時に user から take しない。
+/// Economic model — shared fund pool (equal tranches S:J = 1 assumed):
+///   - Every swap fee is captured into a currency1 fund.
+///   - alpha * F  -> juniorFundClaim  (Junior's collateral and reward)
+///   - (1-alpha)*F -> seniorFeeClaim  (Senior's fee share)
+///   - On Senior exit, absorbed = min(IL, B*V_HODL, juniorFundClaim) is drawn from juniorFundClaim.
+///   - Payouts flow only from the fund to the LP; the hook never takes from the user on remove.
 ///
-/// 成立条件（オフチェーンで連立して (B, α) を算出し注入）:
-///   ΔL(B) < F のとき  α = ΔL/(2F) + 0.5
+/// Feasibility condition (solve offline, inject as constructor args):
+///   alpha = E[absorbed] / (2F) + 0.5    (when E[absorbed] < F)
 ///
-/// IL 損失の基準（FIX[#3]）:
-///   ilWad は「current HODL に対する損失比率」なので、損失額は entry 価値ではなく
-///   current HODL 価値 V_HODL_cur で評価する: ilLoss = ilWad × V_HODL_cur。
-///   V_HODL_cur = entry 数量(amount0, amount1) を current(EMA) 価格で再評価。
-///   これで MC の ratio 比較(ilWad vs B)と完全整合し、注入した (B,α) がオンチェーン挙動に対応する。
+/// IL accounting:
+///   ilWad is a ratio relative to V_HODL_current, so ilLoss = ilWad * V_HODL_current.
+///   V_HODL_current is computed by re-valuing the stored entry amounts at the EMA price.
+///   This keeps the on-chain IL computation consistent with the Monte Carlo model.
 ///
-/// 簡略化（明示）:
-///   - fund / IL は単一通貨 currency1 で会計（cross-currency 変換は TODO）。
-///   - 1 LP = 1 position、かつ remove は「登録レンジ・全量」のみ（FIX[#1] で強制）。
-///   - auth は sender == lp（FIX[auth]）。本番の custodial ルーター(共有)対応は PositionManager の ownerOf 委譲。
-///
-/// ─────────────────────────────────────────────────────────────────────────
+/// Known limitations (MVP):
+///   - Fund and IL are accounted in currency1 only (cross-currency conversion is TODO).
+///   - One position per LP; remove must be a full close of the registered range (enforced).
+///   - Auth is sender == lp. Shared custodial router support requires PositionManager ownerOf delegation.
 contract TrancheHook is BaseHook {
     using StateLibrary for IPoolManager;
     using CurrencySettler for Currency;
 
-    /* ───────────────────────── 型定義 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Types                                                               */
+    /* ------------------------------------------------------------------ */
 
     enum Tranche {
         JUNIOR,
@@ -58,10 +57,10 @@ contract TrancheHook is BaseHook {
     struct LpPosition {
         address owner;
         Tranche tranche;
-        uint128 amount0; // FIX[#3]: entry 数量（V_HODL_current 評価用）
-        uint128 amount1; // FIX[#3]: entry 数量
-        uint128 liquidity; // FIX[#1]: 登録時の L（フルクローズ検証用）
-        uint256 principal; // entry token1 価値（fee 按分の重み）
+        uint128 amount0;         // entry token0 quantity (for V_HODL_current revaluation)
+        uint128 amount1;         // entry token1 quantity
+        uint128 liquidity;       // registered liquidity (enforces full-close on remove)
+        uint256 principal;       // entry token1 value (weight for fee pro-rata)
         uint160 sqrtPriceEntryX96;
         int24 tickLower;
         int24 tickUpper;
@@ -69,31 +68,35 @@ contract TrancheHook is BaseHook {
     }
 
     struct PoolAccount {
-        uint160 sqrtPriceEmaX96; // twap 化した参照価格（操作耐性）
+        uint160 sqrtPriceEmaX96;     // EMA price (manipulation-resistant reference)
         uint256 juniorPrincipalTotal;
         uint256 seniorPrincipalTotal;
-        uint256 juniorFundClaim; // α·F の累積 − Senior 肩代わりで減る
-        uint256 seniorFeeClaim; // (1−α)·F の累積
-        uint256 fundBalance; // hook が実際に保有する currency1 トークン量
+        uint256 juniorFundClaim;     // cumulative alpha*F minus Senior absorptions
+        uint256 seniorFeeClaim;      // cumulative (1-alpha)*F
+        uint256 fundBalance;         // actual currency1 tokens held by this hook
         bool initialized;
     }
 
-    /* ───────────────────────── 状態変数 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  State                                                               */
+    /* ------------------------------------------------------------------ */
 
     uint256 public immutable BUFFER_WAD;
     uint256 public immutable ALPHA_WAD;
 
-    /// @notice hook が swap から徴収する手数料率 (WAD)。F の原資。
-    /// @dev pool の LP fee とは別に hook が上乗せ徴収する分。0 だと fund が貯まらない。
+    /// @notice Extra fee rate (WAD) levied on top of the pool LP fee; this is the fund's revenue source.
     uint256 public immutable HOOK_FEE_WAD;
 
-    uint256 internal constant EMA_WINDOW = 8; // 大きいほど操作耐性↑・追従↓
+    /// @dev Larger window = more manipulation resistance, slower price tracking.
+    uint256 internal constant EMA_WINDOW = 8;
     uint256 internal constant WAD = 1e18;
 
     mapping(PoolId => PoolAccount) public poolAccounts;
     mapping(PoolId => mapping(address => LpPosition)) public positions;
 
-    /* ───────────────────────── イベント ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Events                                                              */
+    /* ------------------------------------------------------------------ */
 
     event PositionOpened(
         PoolId indexed poolId, address indexed lp, Tranche tranche, uint256 principal, uint160 sqrtPriceEntryX96
@@ -109,7 +112,9 @@ contract TrancheHook is BaseHook {
     event WaterfallApplied(PoolId indexed poolId, uint256 totalIl, uint256 absorbedByJunior, uint256 residualToSenior);
     event FeesAccrued(PoolId indexed poolId, uint256 toJunior, uint256 toSenior);
 
-    /* ───────────────────────── エラー ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Errors                                                              */
+    /* ------------------------------------------------------------------ */
 
     error NoPosition();
     error PositionInactive();
@@ -120,26 +125,30 @@ contract TrancheHook is BaseHook {
     error InvalidParam();
     error FundInvariantBroken();
 
-    /* ───────────────────────── 構築 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Constructor                                                         */
+    /* ------------------------------------------------------------------ */
 
     constructor(IPoolManager _manager, uint256 _bufferWad, uint256 _alphaWad, uint256 _hookFeeWad) BaseHook(_manager) {
-        // ALPHA_WAD > WAD → toSenior = fee - toJunior が underflow して swap 全断。
-        // HOOK_FEE_WAD > WAD → fee > outAbs となり PoolManager のバランスチェックで swap 全断。
-        // BUFFER_WAD > WAD → bufferAmount > vHodlCur で経済的に不正（IL 全量を常に補填）。
+        // ALPHA_WAD > WAD  → toSenior = fee - toJunior underflows, breaking every fee-capturing swap.
+        // HOOK_FEE_WAD > WAD → fee > outAbs, rejected by the PoolManager balance check.
+        // BUFFER_WAD > WAD → bufferAmount always exceeds IL, making the waterfall economically unsound.
         if (_alphaWad > WAD || _hookFeeWad > WAD || _bufferWad > WAD) revert InvalidParam();
         BUFFER_WAD = _bufferWad;
         ALPHA_WAD = _alphaWad;
         HOOK_FEE_WAD = _hookFeeWad;
     }
 
-    /* ───────────────────────── 権限 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Hook permissions                                                    */
+    /* ------------------------------------------------------------------ */
 
     function getHookPermissions() public pure override returns (Hooks.Permissions memory) {
         return Hooks.Permissions({
             beforeInitialize: false,
             afterInitialize: false,
             beforeAddLiquidity: false,
-            beforeRemoveLiquidity: false, // 決済は afterRemoveLiquidity に集約
+            beforeRemoveLiquidity: false,
             afterAddLiquidity: true,
             afterRemoveLiquidity: true,
             beforeSwap: false,
@@ -147,27 +156,27 @@ contract TrancheHook is BaseHook {
             beforeDonate: false,
             afterDonate: false,
             beforeSwapReturnDelta: false,
-            afterSwapReturnDelta: true, // 手数料捕捉
+            afterSwapReturnDelta: true,
             afterAddLiquidityReturnDelta: false,
-            afterRemoveLiquidityReturnDelta: true // fund→LP 決済
+            afterRemoveLiquidityReturnDelta: true
         });
     }
 
-    /* ───────────────────────── hookData ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  hookData helpers                                                    */
+    /* ------------------------------------------------------------------ */
 
     function encodeHookData(address lp, Tranche tranche) external pure returns (bytes memory) {
         return abi.encode(lp, tranche);
     }
 
-    function _decodeHookData(bytes calldata hookData)
-        internal
-        pure
-        returns (address lp, Tranche tranche)
-    {
+    function _decodeHookData(bytes calldata hookData) internal pure returns (address lp, Tranche tranche) {
         (lp, tranche) = abi.decode(hookData, (address, Tranche));
     }
 
-    /* ───────────────────────── afterAddLiquidity: 登録 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  afterAddLiquidity — register position                               */
+    /* ------------------------------------------------------------------ */
 
     function _afterAddLiquidity(
         address sender,
@@ -182,15 +191,16 @@ contract TrancheHook is BaseHook {
         }
 
         (address lp, Tranche tranche) = _decodeHookData(hookData);
+        // Require the caller to be the declared LP to prevent hookData spoofing.
+        // Shared custodial router support requires PositionManager ownerOf delegation (roadmap).
         if (lp != sender) revert Unauthorized();
-        // FIX[auth]: lp == sender を強制。custodial ルーター(共有)対応は PositionManager の ownerOf 委譲（roadmap）。
 
         PoolId poolId = key.toId();
         if (positions[poolId][lp].active) revert PositionAlreadyActive();
 
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
 
-        // FIX[②]: principal は PoolManager 由来の delta（実預入量）を entry 価格で token1 評価。
+        // Derive principal from the actual PoolManager delta to prevent self-reported inflation.
         int128 d0 = delta.amount0();
         int128 d1 = delta.amount1();
         uint256 amt0 = d0 < 0 ? uint256(uint128(-d0)) : 0;
@@ -200,9 +210,9 @@ contract TrancheHook is BaseHook {
         positions[poolId][lp] = LpPosition({
             owner: lp,
             tranche: tranche,
-            amount0: uint128(amt0), // FIX[#3]: V_HODL_cur 評価のため entry 数量を保存
-            amount1: uint128(amt1), // FIX[#3]
-            liquidity: uint128(uint256(params.liquidityDelta)), // FIX[#1]: フルクローズ検証用
+            amount0: uint128(amt0),
+            amount1: uint128(amt1),
+            liquidity: uint128(uint256(params.liquidityDelta)),
             principal: principal,
             sqrtPriceEntryX96: sqrtPriceX96,
             tickLower: params.tickLower,
@@ -223,7 +233,9 @@ contract TrancheHook is BaseHook {
         return (BaseHook.afterAddLiquidity.selector, BalanceDeltaLibrary.ZERO_DELTA);
     }
 
-    /* ───────────────────────── afterSwap: 価格EMA + 手数料捕捉 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  afterSwap — update price EMA and capture hook fee                  */
+    /* ------------------------------------------------------------------ */
 
     function _afterSwap(address, PoolKey calldata key, SwapParams calldata params, BalanceDelta delta, bytes calldata)
         internal
@@ -233,11 +245,9 @@ contract TrancheHook is BaseHook {
         PoolId poolId = key.toId();
         PoolAccount storage acct = poolAccounts[poolId];
 
-        // ── 価格 EMA 更新（操作耐性） ──
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
         acct.sqrtPriceEmaX96 = _updateEma(acct.sqrtPriceEmaX96, sqrtPriceX96);
 
-        // ── 手数料捕捉（fund の原資） ──
         int128 hookFee = 0;
         if (params.zeroForOne) {
             int128 out1 = delta.amount1();
@@ -246,6 +256,9 @@ contract TrancheHook is BaseHook {
 
             if (fee > 0) {
                 hookFee = int128(uint128(fee));
+                // take() must precede state updates: v4's unlock delta accounting pairs
+                // afterSwapReturnDelta with take(), and deferring take() causes CurrencyNotSettled.
+                // Re-entrancy is blocked by the PoolManager lock, so this ordering is safe.
                 key.currency1.take(poolManager, address(this), fee, false);
 
                 uint256 toJunior = (fee * ALPHA_WAD) / WAD;
@@ -256,12 +269,14 @@ contract TrancheHook is BaseHook {
                 emit FeesAccrued(poolId, toJunior, toSenior);
             }
         }
-        // TODO[fee-skew]: currency0 側 swap の手数料も拾う（fund を2通貨化 or 変換）。
+        // TODO[fee-skew]: capture fees on oneForZero swaps too (requires dual-currency fund or conversion).
 
         return (BaseHook.afterSwap.selector, hookFee);
     }
 
-    /* ───────────────────────── afterRemoveLiquidity: 充当 + 実決済 ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  afterRemoveLiquidity — waterfall settlement                         */
+    /* ------------------------------------------------------------------ */
 
     function _afterRemoveLiquidity(
         address sender,
@@ -284,9 +299,8 @@ contract TrancheHook is BaseHook {
         if (pos.owner == address(0)) revert NoPosition();
         if (!pos.active) revert PositionInactive();
 
-        // FIX[#1]: remove は登録時と同じレンジ・全量でなければならない。
-        //   部分 remove / 別レンジ remove で「フル principal の保護を払い出して active=false」される
-        //   過剰決済 → fund ドレインを封じる。MVP の「1 LP = 1 position・フルクローズ」前提を強制。
+        // Enforce full-close: a partial or wrong-range remove must not trigger a full payout
+        // and set active = false, which would drain the fund and lock the real position.
         if (params.tickLower != pos.tickLower || params.tickUpper != pos.tickUpper) revert RangeMismatch();
         if (uint256(-params.liquidityDelta) != pos.liquidity) revert PartialCloseNotAllowed();
 
@@ -298,17 +312,17 @@ contract TrancheHook is BaseHook {
             TickMath.getSqrtPriceAtTick(pos.tickLower),
             TickMath.getSqrtPriceAtTick(pos.tickUpper)
         );
-        // FIX[#3]: ilWad は current HODL 比率なので、entry 価値(principal)ではなく current HODL 価値で評価。
-        //   ilWad と同じ価格(EMA)で entry 数量を再評価 → 真の絶対 IL。MC の ratio 比較とも整合。
+        // ilWad is a ratio relative to V_HODL_current, so multiply by V_HODL_current for the
+        // absolute loss. Re-value entry amounts at the EMA price to get V_HODL_current.
         uint256 vHodlCur = ILMath.depositValueInToken1(pos.amount0, pos.amount1, acct.sqrtPriceEmaX96);
         uint256 ilLoss = ILMath.ilAmount(vHodlCur, ilWad);
 
         uint256 lossBorne;
-        uint256 fundPayout; // fund から LP に渡す currency1 額
+        uint256 fundPayout;
 
         if (pos.tranche == Tranche.SENIOR) {
-            // 保護: buffer まで Junior(fund) が肩代わり（buffer も current HODL の B%）
-            uint256 bufferAmount = ILMath.ilAmount(vHodlCur, BUFFER_WAD); // FIX[#3]
+            // Junior fund covers up to min(IL, B * V_HODL_current, juniorFundClaim).
+            uint256 bufferAmount = ILMath.ilAmount(vHodlCur, BUFFER_WAD);
             uint256 absorbed = ilLoss <= bufferAmount ? ilLoss : bufferAmount;
             if (absorbed > acct.juniorFundClaim) absorbed = acct.juniorFundClaim;
             acct.juniorFundClaim -= absorbed;
@@ -320,13 +334,13 @@ contract TrancheHook is BaseHook {
                 acct.seniorPrincipalTotal == 0 ? 0 : (acct.seniorFeeClaim * pos.principal) / acct.seniorPrincipalTotal;
             acct.seniorFeeClaim -= feeShare;
 
-            fundPayout = absorbed + feeShare; // 保護分 + 手数料取り分
+            fundPayout = absorbed + feeShare;
             acct.seniorPrincipalTotal -= _min(pos.principal, acct.seniorPrincipalTotal);
 
             emit WaterfallApplied(poolId, ilLoss, absorbed, residual);
         } else {
-            // Junior: 自身の IL はプール退出で normal に実現（hook は補填しない）。
-            // fund からは「残った取り分(= α手数料 − 肩代わり後)」をシェア按分で受け取る。
+            // Junior bears its own IL. Receives pro-rata share of remaining juniorFundClaim
+            // (accumulated alpha*F minus any Senior absorptions already drawn).
             lossBorne = ilLoss;
             uint256 feeShare =
                 acct.juniorPrincipalTotal == 0 ? 0 : (acct.juniorFundClaim * pos.principal) / acct.juniorPrincipalTotal;
@@ -336,16 +350,16 @@ contract TrancheHook is BaseHook {
             acct.juniorPrincipalTotal -= _min(pos.principal, acct.juniorPrincipalTotal);
         }
 
+        // CEI: mark inactive before the external settle call.
         pos.active = false;
 
-        // ── 実決済: fund → LP へ currency1 を支払う（Interaction 最後）──
-        // 不変条件 juniorFundClaim + seniorFeeClaim == fundBalance が保たれる限り
-        // fundBalance >= fundPayout は常に真。偽は別バグによる不変条件崩壊 → fail-loud。
+        // The invariant juniorFundClaim + seniorFeeClaim == fundBalance guarantees fundBalance >= fundPayout.
+        // A breach signals a bug elsewhere; revert to avoid silent inconsistency.
         if (fundPayout > acct.fundBalance) revert FundInvariantBroken();
         BalanceDelta hookDelta = BalanceDeltaLibrary.ZERO_DELTA;
         if (fundPayout > 0) {
             acct.fundBalance -= fundPayout;
-            key.currency1.settle(poolManager, address(this), fundPayout, false); // interaction
+            key.currency1.settle(poolManager, address(this), fundPayout, false);
             hookDelta = toBalanceDelta(0, -int128(uint128(fundPayout)));
         }
 
@@ -354,9 +368,11 @@ contract TrancheHook is BaseHook {
         return (BaseHook.afterRemoveLiquidity.selector, hookDelta);
     }
 
-    /* ───────────────────────── 内部ヘルパ ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  Internal helpers                                                    */
+    /* ------------------------------------------------------------------ */
 
-    /// @dev 整数 EMA: ema' = (ema*(W-1) + price) / W
+    /// @dev Integer EMA: ema' = (ema * (W-1) + price) / W
     function _updateEma(uint160 ema, uint160 price) internal pure returns (uint160) {
         if (ema == 0) return price;
         uint256 next = (uint256(ema) * (EMA_WINDOW - 1) + uint256(price)) / EMA_WINDOW;
@@ -367,7 +383,9 @@ contract TrancheHook is BaseHook {
         return a < b ? a : b;
     }
 
-    /* ───────────────────────── view ───────────────────────── */
+    /* ------------------------------------------------------------------ */
+    /*  View functions                                                      */
+    /* ------------------------------------------------------------------ */
 
     function quoteRealizedIl(PoolId poolId, address lp) external view returns (uint256 ilWad, uint256 ilLoss) {
         LpPosition memory pos = positions[poolId][lp];
@@ -379,7 +397,6 @@ contract TrancheHook is BaseHook {
             TickMath.getSqrtPriceAtTick(pos.tickLower),
             TickMath.getSqrtPriceAtTick(pos.tickUpper)
         );
-        // FIX[#3]: current HODL 価値でスケール（entry の principal ではなく）。
         uint256 vHodlCur = ILMath.depositValueInToken1(pos.amount0, pos.amount1, emaP);
         ilLoss = ILMath.ilAmount(vHodlCur, ilWad);
     }
