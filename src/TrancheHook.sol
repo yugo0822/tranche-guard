@@ -57,10 +57,10 @@ contract TrancheHook is BaseHook {
     struct LpPosition {
         address owner;
         Tranche tranche;
-        uint128 amount0;         // entry token0 quantity (for V_HODL_current revaluation)
-        uint128 amount1;         // entry token1 quantity
-        uint128 liquidity;       // registered liquidity (enforces full-close on remove)
-        uint256 principal;       // entry token1 value (weight for fee pro-rata)
+        uint128 amount0; // entry token0 quantity (for V_HODL_current revaluation)
+        uint128 amount1; // entry token1 quantity
+        uint128 liquidity; // registered liquidity (enforces full-close on remove)
+        uint256 principal; // entry token1 value (weight for fee pro-rata)
         uint160 sqrtPriceEntryX96;
         int24 tickLower;
         int24 tickUpper;
@@ -68,12 +68,12 @@ contract TrancheHook is BaseHook {
     }
 
     struct PoolAccount {
-        uint160 sqrtPriceEmaX96;     // EMA price (manipulation-resistant reference)
+        uint160 sqrtPriceEmaX96; // EMA price (manipulation-resistant reference)
         uint256 juniorPrincipalTotal;
         uint256 seniorPrincipalTotal;
-        uint256 juniorFundClaim;     // cumulative alpha*F minus Senior absorptions
-        uint256 seniorFeeClaim;      // cumulative (1-alpha)*F
-        uint256 fundBalance;         // actual currency1 tokens held by this hook
+        uint256 juniorFundClaim; // cumulative alpha*F minus Senior absorptions
+        uint256 seniorFeeClaim; // cumulative (1-alpha)*F
+        uint256 fundBalance; // actual currency1 tokens held by this hook
         bool initialized;
     }
 

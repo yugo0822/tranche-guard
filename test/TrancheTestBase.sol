@@ -5,7 +5,6 @@ import {Test, console2} from "forge-std/Test.sol";
 
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
-// ⚠️[API] per-LP ルーターの本体。root の test/ にある。remapping は他のテストと同じ "v4-core/test/..."。
 import {PoolModifyLiquidityTest} from "v4-core/test/PoolModifyLiquidityTest.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -17,33 +16,29 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId} from "v4-core/types/PoolId.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
-// ⚠️[API] approve 用の最小 ERC20 IF。solmate の MockERC20 を import せずに済むよう v4-core 内のものを使う。
 import {IERC20Minimal} from "v4-core/interfaces/external/IERC20Minimal.sol";
 
 import {TrancheHook} from "../src/TrancheHook.sol";
-import {ILMath} from "../src/ILMath.sol"; // FIX[#3]: hook と同一式で V_HODL_cur / buffer を出すため
+import {ILMath} from "../src/ILMath.sol";
 
-/// @notice per-LP ルーター方式の共有テスト基盤。
+/// @notice Shared test base using per-LP routers.
 ///
-///   ─ なぜ per-LP ルーターか（FIX[auth] の前提）─
-///   hook が `require(lp == sender)` を課したので、hook が見る sender（= PoolManager を叩いた
-///   アドレス）と hookData.lp が一致せねばならない。共有 modifyLiquidityRouter だと sender が
-///   全 LP 共通になり区別できないため、LP ごとに専用ルーターをデプロイする。
-///   これにより sender == hookData.lp == そのルーターアドレス となり、別人の lp 指定（なりすまし）
-///   が revert する。さらに各ルーターは PoolManager 上で別 owner になるので、salt 0・同 tick でも
-///   ポジションが commingle しない（共有ルーター時の副作用も同時に解消）。
+/// The hook enforces `require(lp == sender)`, so the sender seen by the hook
+/// (the address that called PoolManager) must match hookData.lp. A shared
+/// router would make all LPs indistinguishable. Each LP gets its own router,
+/// so sender == hookData.lp == that router address, and spoofed lp values revert.
+/// Each router is also a separate PoolManager owner, so positions never commingle
+/// even with salt 0 and identical ticks.
 ///
-///   ─ LP identity ─
-///   LP の識別子 = 専用ルーターのアドレス address(lpRouter)。
-///   ポジション参照も hook.getPosition(poolId, address(lpRouter)) で引く。
-///   スワップは認証不要（hook._afterSwap は lp を見ない）なので共有 swapRouter のまま。
+/// LP identity = address(lpRouter). Positions are keyed by hook.getPosition(poolId, address(lpRouter)).
+/// Swaps use the shared swapRouter because afterSwap does not inspect lp.
 abstract contract TrancheTestBase is Test, Deployers {
     using StateLibrary for IPoolManager;
 
     uint256 internal constant WAD = 1e18;
 
-    /// @dev hook を (buffer, alpha, hookFee) 指定でデプロイし、tick0(price 1.0)でプール初期化して返す。
-    ///   fee/params ごとにアドレス名前空間を散らして衝突回避（フラグ部は不変）。
+    /// @dev Deploy a hook with given (buffer, alpha, hookFee) and initialize a pool at tick 0 (price 1.0).
+    ///   The hook address namespace is salted by the params to avoid address collisions.
     function _deployHookAndPool(uint256 bufferWad, uint256 alphaWad, uint256 hookFeeWad)
         internal
         returns (TrancheHook hook, PoolKey memory key, PoolId poolId)
@@ -55,24 +50,20 @@ abstract contract TrancheTestBase is Test, Deployers {
         uint160 ns = uint160(uint256(keccak256(abi.encode(bufferWad, alphaWad, hookFeeWad))) & 0xffff);
         address hookAddress = address(flags ^ (ns << 144));
         bytes memory args = abi.encode(IPoolManager(address(manager)), bufferWad, alphaWad, hookFeeWad);
-        // ⚠️[API] deployCodeTo の引数順（"path:Contract", ctorArgs, targetAddr）。
         deployCodeTo("TrancheHook.sol:TrancheHook", args, hookAddress);
         hook = TrancheHook(hookAddress);
 
-        // ⚠️[API] initPool 署名（fee 3000 = 0.3%。hook 手数料はこれとは別枠）。
         (key, poolId) = initPool(currency0, currency1, IHooks(address(hook)), 3000, TickMath.getSqrtPriceAtTick(0));
     }
 
-    /// @dev LP 専用ルーターをデプロイし、両 currency を approve。返り値(=router address)が LP identity。
-    ///   approve は本テスト契約(address(this))のトークンを lpRouter に許可する（router が transferFrom する）。
+    /// @dev Deploy a dedicated LP router and approve both currencies. The router address is the LP identity.
     function _newLp() internal returns (PoolModifyLiquidityTest lpRouter) {
-        // ⚠️[API] PoolModifyLiquidityTest のコンストラクタ引数（IPoolManager）。
         lpRouter = new PoolModifyLiquidityTest(IPoolManager(address(manager)));
         IERC20Minimal(Currency.unwrap(currency0)).approve(address(lpRouter), type(uint256).max);
         IERC20Minimal(Currency.unwrap(currency1)).approve(address(lpRouter), type(uint256).max);
     }
 
-    /// @dev 指定ルーター(=LP)経由で流動性追加。hookData.lp は必ず address(lpRouter)=sender に一致させる。
+    /// @dev Add liquidity via a dedicated LP router. hookData.lp must equal address(lpRouter).
     function _addLiq(
         PoolModifyLiquidityTest lpRouter,
         PoolKey memory key,
@@ -88,7 +79,7 @@ abstract contract TrancheTestBase is Test, Deployers {
         );
     }
 
-    /// @dev 指定ルーター(=LP)経由で流動性除去。
+    /// @dev Remove liquidity via a dedicated LP router.
     function _removeLiq(
         PoolModifyLiquidityTest lpRouter,
         PoolKey memory key,
@@ -104,7 +95,7 @@ abstract contract TrancheTestBase is Test, Deployers {
         );
     }
 
-    /// @dev スワップ（共有 swapRouter で OK。hook は swap で lp を見ない）。負 amount = exactInput。
+    /// @dev Execute a swap. Negative amountSpecified = exactInput.
     function _swap(PoolKey memory key, bool zeroForOne, uint256 amountIn) internal {
         swapRouter.swap(
             key,
@@ -123,9 +114,9 @@ abstract contract TrancheTestBase is Test, Deployers {
         return m < c ? m : c;
     }
 
-    /// @dev FIX[#3]: hook と同一式で current HODL 価値を出す（ilLoss / buffer のスケール基準）。
-    ///   hook は退出時に entry 数量(amount0, amount1)を EMA 価格で再評価する。テストの期待値も同じ式で出す。
-    ///   remove は EMA を動かさないので、remove 前後どちらで呼んでも同値（amount0/1 も active=false 後も残る）。
+    /// @dev Compute V_HODL_current using the same formula as the hook:
+    ///   re-value entry amounts (amount0, amount1) at the current EMA price.
+    ///   remove() does not update the EMA, so this is stable before and after removal.
     function _vHodlCurrent(TrancheHook hook, PoolId poolId, address lp) internal view returns (uint256) {
         TrancheHook.LpPosition memory pos = hook.getPosition(poolId, lp);
         uint160 emaP = hook.getPoolAccount(poolId).sqrtPriceEmaX96;
