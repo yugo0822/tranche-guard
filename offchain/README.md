@@ -155,14 +155,14 @@ longer horizons (larger IL), and loosens with higher turnover (more fees).
 `σ = 60%`, `T = 30d`, range `±0.5`, turnover `20×`, `λ = 0.30`:
 
 ```
-B = 4.20% of principal      α = 0.637  (Junior 63.7% / Senior 36.3%)      premium Δ = 0.70%
+B = 3.88% of principal      α = 0.626  (Junior 62.6% / Senior 37.4%)      premium Δ = 0.57%
 ```
 
 | Tranche | Mean return | Std | 1st pct | Loss probability |
 |---------|-------------|-----|---------|------------------|
-| **Senior**  | +4.10% | 0.011 | −1.53% | **1.8%** |
-| Plain LP    | +4.46% | 0.022 | −4.09% | 4.8% |
-| **Junior**  | +4.81% | 0.034 | −6.64% | **11.6%** |
+| **Senior**  | +4.25% | 0.010 | −1.07% | **1.5%** |
+| Plain LP    | +4.57% | 0.020 | −3.21% | 4.0% |
+| **Junior**  | +4.90% | 0.032 | −5.88% | **10.5%** |
 
 Returns and risk are both **monotone** across the three profiles — a genuine tranche structure:
 Senior trades a little expected return for roughly halved downside; Junior earns a premium for
@@ -176,8 +176,8 @@ The hook constructor takes three immutables. Convert the derived fractions to WA
 
 | Model output | Constructor arg | Example (representative case) |
 |--------------|-----------------|-------------------------------|
-| `B`               | `BUFFER_WAD`   | `0.0420 → 42000000000000000` |
-| `α`               | `ALPHA_WAD`    | `0.637  → 637000000000000000` |
+| `B`               | `BUFFER_WAD`   | `0.0388 → 38775050248575256` |
+| `α`               | `ALPHA_WAD`    | `0.626  → 626226265377168256` |
 | per-swap fee rate | `HOOK_FEE_WAD` | `rate × 1e18` |
 
 Notes:

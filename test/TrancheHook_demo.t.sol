@@ -36,7 +36,7 @@ contract TrancheHookDemoTest is TrancheTestBase {
     int24 constant TL = -6000; // price 0.5488
     int24 constant TU = 6000; // price 1.8221
 
-    uint256 constant HOOK_FEE_WAD = 0.01e18;
+    uint256 constant HOOK_FEE_WAD = 0.1e18;
 
     // Tuning knobs: increase N_SWAPS/SWAP_SIZE if IL is too low; decrease if PriceLimitAlreadyExceeded.
     uint256 constant N_SWAPS = 12;
