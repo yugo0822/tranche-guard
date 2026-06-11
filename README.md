@@ -16,6 +16,12 @@
 
 ---
 
+## Partner integrations
+
+No partner integrations.
+
+---
+
 ## TL;DR
 
 TrancheGuard is a Uniswap v4 hook (`TrancheHook`) that splits a pool into two tranches LPs choose at deposit:
