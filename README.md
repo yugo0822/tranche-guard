@@ -6,7 +6,7 @@
 
 ![Built with Foundry](https://img.shields.io/badge/built%20with-Foundry-FFDB1C)
 ![Solidity](https://img.shields.io/badge/Solidity-0.8.26-363636)
-![Tests](https://img.shields.io/badge/tests-12%20passing-2EC4B6)
+![Tests](https://img.shields.io/badge/tests-13%20passing-2EC4B6)
 ![License](https://img.shields.io/badge/license-MIT-94A3B8)
 ![UHI9](https://img.shields.io/badge/Uniswap%20Hook%20Incubator-cohort%209-FF6B6B)
 
@@ -118,7 +118,7 @@ The hook implements three lifecycle callbacks:
 | Callback | What it does |
 |---|---|
 | `afterAddLiquidity` | Registers the LP's tranche and **principal**, valued from the PoolManager's `BalanceDelta` (not from caller-supplied data). |
-| `afterSwap` | Captures a small additive fee into the fund and splits it `α` / `1 − α` into the Junior and Senior claims. |
+| `afterSwap` | Captures a small additive fee in the swap's output currency. The `currency1` leg (which funds protection) is split `α` / `1 − α`; the `currency0` leg carries no premium and is split pro-rata by principal. |
 | `afterRemoveLiquidity` | Runs the waterfall on exit: `absorbed = min(IL, B·V_hodl, juniorFund)`, pays Senior from the Junior fund, and settles fund → LP via a return delta. |
 
 **Trust anchors**
@@ -186,7 +186,7 @@ Requires [Foundry](https://book.getfoundry.sh/getting-started/installation).
 ```bash
 forge install        # fetch dependencies
 forge build
-forge test           # full suite — 12 passing
+forge test           # full suite — 13 passing
 ```
 
 Run the end-to-end demo and read the protection in action:
@@ -215,7 +215,7 @@ The demo test (`test_demo_derivedParams_protectSenior`) asserts three things, th
 - `residual < ilLoss` — the Senior LP bears strictly less than a plain, unprotected LP would.
 - `absorbed == min(IL, B·V_hodl, juniorFund)` — the absorbed amount is exactly the waterfall formula.
 
-The suite also covers fee capture and `α` split, fund → LP settlement, the loss waterfall, anti-spoofing auth, boundary cases (IL above buffer; fund insufficient), and fuzz tests over the IL math — 12 tests, all green.
+The suite also covers two-sided fee capture (the `currency1` `α` split and the `currency0` principal pro-rata split), fund → LP settlement on both currency legs, the loss waterfall, anti-spoofing auth, boundary cases (IL above buffer; fund insufficient), and fuzz tests over the IL math — 13 tests, all green.
 
 > The demo's `HOOK_FEE_WAD` is set high so a few swaps fill the fund; production fees are small (~0.3% or lower) and the fund builds gradually. It is a single-path illustration of mechanism correctness, not a reproduction of the Monte-Carlo distribution — that is the role of the Python analysis.
 
@@ -227,23 +227,24 @@ A **tested MVP**, with the edges stated plainly rather than hidden.
 
 **Shipped**
 - v4 hook with `afterSwap` / `afterRemoveLiquidity` return-delta settlement.
+- Two-sided fee capture: `currency1` (α split, funds protection) and `currency0` (principal pro-rata, no premium).
 - Monte-Carlo-derived `(B, α)` injected on-chain.
-- Loss waterfall with real fund settlement and a solvency invariant.
+- Loss waterfall with real fund settlement and a per-currency solvency invariant.
 - Concentrated-liquidity IL math (3-branch, overflow-safe), mirrored on- and off-chain.
-- 12 green tests: unit, fuzz, limit, and anti-spoofing auth.
+- 13 green tests: unit, fuzz, limit, and anti-spoofing auth.
 
 **Known limitations (deliberate MVP scope)**
-- Fund and IL are accounted in `currency1` only (cross-currency conversion is TODO).
+- IL and Senior protection are accounted in `currency1` only; the `currency0` fee fund pays yield to both tranches but never IL protection.
+- Fee capture assumes exact-input swaps (the output is the unspecified currency the return delta applies to); exact-output is out of scope.
 - One position per LP; removal must be a full close of the registered range (enforced).
 - Price reference is a count-based EMA, not a time-weighted TWAP.
-- Fees are captured on one swap direction only.
 - Auth is `sender == lp`; shared custodial routers need PositionManager `ownerOf` delegation.
 - Equal tranches (S : J = 1) assumed; solvency is enforced in expectation, not in the tail.
 - Not externally audited.
 
 **Roadmap**
 - EMA → time-weighted TWAP oracle.
-- Two-sided fee capture.
+- Exact-output swap support for fee capture.
 - PositionManager-based (NFT) owner auth.
 - Multiple positions / partial closes per LP.
 - General capital structure (S : J ≠ 1) and a tail-solvency gate.

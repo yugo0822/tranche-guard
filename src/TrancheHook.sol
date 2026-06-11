@@ -37,8 +37,15 @@ import {ILMath} from "./ILMath.sol";
 ///   V_HODL_current is computed by re-valuing the stored entry amounts at the EMA price.
 ///   This keeps the on-chain IL computation consistent with the Monte Carlo model.
 ///
+/// Fee capture:
+///   - Fees are taken in the swap's output currency: zeroForOne -> currency1 (alpha split,
+///     funds Senior protection), oneForZero -> currency0 (principal pro-rata, no premium).
+///   - This assumes exact-input swaps, where the unspecified currency the afterSwapReturnDelta
+///     applies to is the output. exact-output swaps are out of scope.
+///
 /// Known limitations (MVP):
-///   - Fund and IL are accounted in currency1 only (cross-currency conversion is TODO).
+///   - IL and Senior protection are accounted in currency1 only; the currency0 fund pays fee
+///     yield to both tranches but never IL protection.
 ///   - One position per LP; remove must be a full close of the registered range (enforced).
 ///   - Auth is sender == lp. Shared custodial router support requires PositionManager ownerOf delegation.
 contract TrancheHook is BaseHook {
@@ -71,9 +78,14 @@ contract TrancheHook is BaseHook {
         uint160 sqrtPriceEmaX96; // EMA price (manipulation-resistant reference)
         uint256 juniorPrincipalTotal;
         uint256 seniorPrincipalTotal;
-        uint256 juniorFundClaim; // cumulative alpha*F minus Senior absorptions
-        uint256 seniorFeeClaim; // cumulative (1-alpha)*F
+        uint256 juniorFundClaim; // cumulative alpha*F minus Senior absorptions (currency1)
+        uint256 seniorFeeClaim; // cumulative (1-alpha)*F (currency1)
         uint256 fundBalance; // actual currency1 tokens held by this hook
+        // currency0 mirror: fees captured on oneForZero swaps. No protection is paid from this
+        // leg, so it has no alpha premium — it is split pro-rata by principal (see _afterSwap).
+        uint256 juniorFundClaim0;
+        uint256 seniorFeeClaim0;
+        uint256 fundBalance0; // actual currency0 tokens held by this hook
         bool initialized;
     }
 
@@ -248,8 +260,11 @@ contract TrancheHook is BaseHook {
         (uint160 sqrtPriceX96,,,) = poolManager.getSlot0(poolId);
         acct.sqrtPriceEmaX96 = _updateEma(acct.sqrtPriceEmaX96, sqrtPriceX96);
 
+        // Fees are taken in the swap's output (unspecified) currency. This assumes exact-input
+        // swaps, which is the hook's standing assumption (see contract NatSpec).
         int128 hookFee = 0;
         if (params.zeroForOne) {
+            // Output is currency1: capture with the alpha split (this leg funds Senior protection).
             int128 out1 = delta.amount1();
             uint256 outAbs = out1 < 0 ? uint256(uint128(-out1)) : uint256(uint128(out1));
             uint256 fee = (outAbs * HOOK_FEE_WAD) / WAD;
@@ -268,8 +283,26 @@ contract TrancheHook is BaseHook {
                 acct.fundBalance += fee;
                 emit FeesAccrued(poolId, toJunior, toSenior);
             }
+        } else {
+            // Output is currency0. This leg never pays IL protection, so there is no premium to
+            // earn: split pro-rata by principal (equal tranches => ~50/50), not by alpha.
+            int128 out0 = delta.amount0();
+            uint256 outAbs = out0 < 0 ? uint256(uint128(-out0)) : uint256(uint128(out0));
+            uint256 fee = (outAbs * HOOK_FEE_WAD) / WAD;
+
+            if (fee > 0) {
+                hookFee = int128(uint128(fee));
+                key.currency0.take(poolManager, address(this), fee, false);
+
+                uint256 tot = acct.juniorPrincipalTotal + acct.seniorPrincipalTotal;
+                uint256 toJunior = tot == 0 ? fee / 2 : (fee * acct.juniorPrincipalTotal) / tot;
+                uint256 toSenior = fee - toJunior;
+                acct.juniorFundClaim0 += toJunior;
+                acct.seniorFeeClaim0 += toSenior;
+                acct.fundBalance0 += fee;
+                emit FeesAccrued(poolId, toJunior, toSenior);
+            }
         }
-        // TODO[fee-skew]: capture fees on oneForZero swaps too (requires dual-currency fund or conversion).
 
         return (BaseHook.afterSwap.selector, hookFee);
     }
@@ -318,7 +351,8 @@ contract TrancheHook is BaseHook {
         uint256 ilLoss = ILMath.ilAmount(vHodlCur, ilWad);
 
         uint256 lossBorne;
-        uint256 fundPayout;
+        uint256 fundPayout; // currency1 payout (fee share + any protection)
+        uint256 fundPayout0; // currency0 payout (fee share only)
 
         if (pos.tranche == Tranche.SENIOR) {
             // Junior fund covers up to min(IL, B * V_HODL_current, juniorFundClaim).
@@ -330,11 +364,16 @@ contract TrancheHook is BaseHook {
             uint256 residual = ilLoss > absorbed ? ilLoss - absorbed : 0;
             lossBorne = residual;
 
+            // Both fee shares use the principal denominator before it is decremented below.
             uint256 feeShare =
                 acct.seniorPrincipalTotal == 0 ? 0 : (acct.seniorFeeClaim * pos.principal) / acct.seniorPrincipalTotal;
+            uint256 feeShare0 =
+                acct.seniorPrincipalTotal == 0 ? 0 : (acct.seniorFeeClaim0 * pos.principal) / acct.seniorPrincipalTotal;
             acct.seniorFeeClaim -= feeShare;
+            acct.seniorFeeClaim0 -= feeShare0;
 
             fundPayout = absorbed + feeShare;
+            fundPayout0 = feeShare0;
             acct.seniorPrincipalTotal -= _min(pos.principal, acct.seniorPrincipalTotal);
 
             emit WaterfallApplied(poolId, ilLoss, absorbed, residual);
@@ -344,28 +383,42 @@ contract TrancheHook is BaseHook {
             lossBorne = ilLoss;
             uint256 feeShare =
                 acct.juniorPrincipalTotal == 0 ? 0 : (acct.juniorFundClaim * pos.principal) / acct.juniorPrincipalTotal;
+            uint256 feeShare0 = acct.juniorPrincipalTotal == 0
+                ? 0
+                : (acct.juniorFundClaim0 * pos.principal) / acct.juniorPrincipalTotal;
             acct.juniorFundClaim -= feeShare;
+            acct.juniorFundClaim0 -= feeShare0;
 
             fundPayout = feeShare;
+            fundPayout0 = feeShare0;
             acct.juniorPrincipalTotal -= _min(pos.principal, acct.juniorPrincipalTotal);
         }
 
         // CEI: mark inactive before the external settle call.
         pos.active = false;
 
-        // The invariant juniorFundClaim + seniorFeeClaim == fundBalance guarantees fundBalance >= fundPayout.
-        // A breach signals a bug elsewhere; revert to avoid silent inconsistency.
+        // The invariant {junior,senior} claims == fundBalance per currency guarantees the held
+        // balance covers each payout. A breach signals a bug elsewhere; revert to avoid silent
+        // inconsistency.
         if (fundPayout > acct.fundBalance) revert FundInvariantBroken();
-        BalanceDelta hookDelta = BalanceDeltaLibrary.ZERO_DELTA;
+        if (fundPayout0 > acct.fundBalance0) revert FundInvariantBroken();
+
+        int128 hookD0 = 0;
+        int128 hookD1 = 0;
+        if (fundPayout0 > 0) {
+            acct.fundBalance0 -= fundPayout0;
+            key.currency0.settle(poolManager, address(this), fundPayout0, false);
+            hookD0 = -int128(uint128(fundPayout0));
+        }
         if (fundPayout > 0) {
             acct.fundBalance -= fundPayout;
             key.currency1.settle(poolManager, address(this), fundPayout, false);
-            hookDelta = toBalanceDelta(0, -int128(uint128(fundPayout)));
+            hookD1 = -int128(uint128(fundPayout));
         }
 
         emit PositionClosed(poolId, lp, pos.tranche, ilWad, lossBorne, fundPayout);
 
-        return (BaseHook.afterRemoveLiquidity.selector, hookDelta);
+        return (BaseHook.afterRemoveLiquidity.selector, toBalanceDelta(hookD0, hookD1));
     }
 
     /* ------------------------------------------------------------------ */

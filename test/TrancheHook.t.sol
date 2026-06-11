@@ -73,6 +73,56 @@ contract TrancheHookTest is TrancheTestBase {
         console2.log("seniorFeeClaim", aft.seniorFeeClaim);
     }
 
+    /// @notice oneForZero swaps capture fees in currency0, split pro-rata by principal (no alpha).
+    ///   The currency0 leg never funds Senior protection, so it carries no premium: with equal
+    ///   J/S principal the split is ~50/50, unlike the alpha split on the currency1 leg.
+    function test_V2b_feeCapturedOnOneForZero() public {
+        TrancheHook.PoolAccount memory bef = hook.getPoolAccount(poolId);
+        assertEq(bef.fundBalance0, 0, "currency0 fund should start empty");
+
+        uint256 hookBal0 = currency0.balanceOf(address(hook));
+
+        _swap(poolKey, false, 1 ether); // oneForZero -> output currency0
+
+        TrancheHook.PoolAccount memory aft = hook.getPoolAccount(poolId);
+
+        assertGt(aft.fundBalance0, 0, "[V2b] currency0 fund did not grow -> take/return-delta sign wrong");
+        assertEq(currency0.balanceOf(address(hook)) - hookBal0, aft.fundBalance0, "[V2b] held tokens != fund ledger");
+
+        // Principal pro-rata: equal J/S principal => ~50/50, NOT the alpha split.
+        assertApproxEqRel(aft.juniorFundClaim0, aft.fundBalance0 / 2, 1e15, "[V2b] currency0 not principal pro-rata");
+        assertEq(aft.juniorFundClaim0 + aft.seniorFeeClaim0, aft.fundBalance0, "[V2b] currency0 ledger != fund");
+
+        // The currency1 leg must be untouched by a oneForZero swap.
+        assertEq(aft.fundBalance, 0, "[V2b] currency1 fund should be untouched by oneForZero");
+
+        console2.log("fundBalance0", aft.fundBalance0);
+        console2.log("juniorFundClaim0", aft.juniorFundClaim0);
+        console2.log("seniorFeeClaim0", aft.seniorFeeClaim0);
+    }
+
+    /// @notice The currency0 fund is paid out to LPs on removal (exercises the dual-leg settle path).
+    function test_V3b_currency0FeePaidOnRemove() public {
+        _swap(poolKey, false, 2 ether); // build the currency0 fund via a oneForZero swap
+
+        TrancheHook.PoolAccount memory bef = hook.getPoolAccount(poolId);
+        assertGt(bef.fundBalance0, 0, "need currency0 fund before settle");
+
+        uint256 hookBal0Before = currency0.balanceOf(address(hook));
+        uint256 recipient0Before = currency0.balanceOf(address(this));
+
+        _removeLiq(juniorRouter, poolKey, TrancheHook.Tranche.JUNIOR, 10 ether, TL, TU);
+
+        TrancheHook.PoolAccount memory aft = hook.getPoolAccount(poolId);
+
+        assertLt(aft.fundBalance0, bef.fundBalance0, "[V3b] currency0 fund did not decrease -> not paid out");
+        uint256 paid0 = bef.fundBalance0 - aft.fundBalance0;
+        assertEq(hookBal0Before - currency0.balanceOf(address(hook)), paid0, "[V3b] settled token != ledger delta");
+        assertGt(currency0.balanceOf(address(this)), recipient0Before, "[V3b] recipient got no extra currency0");
+
+        console2.log("currency0 paid from fund", paid0);
+    }
+
     /* ------------------------------------------------------------------ */
     /*  Position storage                                                    */
     /* ------------------------------------------------------------------ */
