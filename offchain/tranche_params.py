@@ -161,6 +161,68 @@ def risk_metrics(il_samples, F, B, alpha):
 
 
 # ──────────────────────────────────────────────────────────────────
+# Charts (the PNGs referenced from the READMEs)
+# ──────────────────────────────────────────────────────────────────
+def save_charts(il_samples, B, buffer_pct, rm, outdir="."):
+    import os
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    COLORS = {"senior": "#2EC4B6", "plain": "#94A3B8", "junior": "#FF6B6B"}
+
+    def style(ax):
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        ax.grid(axis="y", alpha=0.25)
+
+    # money_chart.png — risk vs return of the three profiles
+    fig, ax = plt.subplots(figsize=(7.6, 4.6), dpi=150)
+    profiles = [("Senior", "senior"), ("Plain LP", "plain"), ("Junior", "junior")]
+    xs = [rm[k]["std"] * 100 for _, k in profiles]
+    ys = [rm[k]["mean"] * 100 for _, k in profiles]
+    ax.plot(xs, ys, "--", color="#CBD5E1", lw=1.2, zorder=1)
+    for (name, k), x, y in zip(profiles, xs, ys):
+        ax.scatter(x, y, s=180, color=COLORS[k], edgecolor="white", lw=1.5, zorder=2)
+        ax.annotate(f"{name}\n{y:+.2f}%  ·  P(loss) {rm[k]['loss_prob']:.1%}",
+                    (x, y), textcoords="offset points", xytext=(12, -8), fontsize=9)
+    ax.set_xlabel("Risk — std of period return (%)")
+    ax.set_ylabel("Expected period return (%)")
+    ax.set_title("Same pool, same fees — three risk profiles", fontsize=11)
+    ax.margins(x=0.25, y=0.25)
+    style(ax)
+    fig.tight_layout()
+    money_path = os.path.join(outdir, "money_chart.png")
+    fig.savefig(money_path)
+    plt.close(fig)
+
+    # il_distribution.png — simulated IL with the buffer at the chosen percentile
+    fig, ax = plt.subplots(figsize=(6.2, 4.0), dpi=150)
+    vals = il_samples * 100
+    clip = np.percentile(vals, 99.5)
+    bins = np.linspace(0, clip, 121)
+    ax.hist(vals[vals <= B * 100], bins=bins, color="#2EC4B6", alpha=0.8,
+            label="absorbed by Junior (Senior whole)")
+    ax.hist(vals[(vals > B * 100) & (vals <= clip)], bins=bins, color="#FF6B6B", alpha=0.8,
+            label="tail beyond B (Senior residual)")
+    ax.axvline(B * 100, color="#475569", ls="--", lw=1.4)
+    ax.text(B * 100, ax.get_ylim()[1] * 0.97,
+            f"  buffer B = {B * 100:.2f}% ({buffer_pct}th pct)",
+            color="#475569", va="top", fontsize=9)
+    ax.legend(frameon=False, fontsize=9, loc="center right")
+    ax.set_xlabel("Impermanent loss (% of principal)")
+    ax.set_ylabel("Simulated paths")
+    ax.set_title("Simulated IL distribution and the protection buffer", fontsize=11)
+    style(ax)
+    fig.tight_layout()
+    il_path = os.path.join(outdir, "il_distribution.png")
+    fig.savefig(il_path)
+    plt.close(fig)
+
+    return money_path, il_path
+
+
+# ──────────────────────────────────────────────────────────────────
 # Main: sweet-spot search
 # ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -200,7 +262,7 @@ if __name__ == "__main__":
             print()
 
     # ── Representative sweet spot (with risk metrics) ──
-    REP_HW = 3000
+    REP_HW = 6000
     REP_TURN = 20
     tl, tu = -REP_HW, +REP_HW
     print("=" * 108)
@@ -225,3 +287,9 @@ if __name__ == "__main__":
     for name, key in [("Senior", "senior"), ("Plain LP", "plain"), ("Junior", "junior")]:
         s = rm[key]
         print(f"  {name:8}{s['mean']:>+9.4f}{s['std']:>10.4f}{s['p05']:>+9.4f}{s['p01']:>+9.4f}{s['loss_prob']:>10.1%}")
+
+    import os
+    charts = save_charts(il, r['B'], BUFFER_PCT, rm, outdir=os.path.dirname(os.path.abspath(__file__)))
+    print()
+    print(f"  charts: {charts[0]}")
+    print(f"          {charts[1]}")

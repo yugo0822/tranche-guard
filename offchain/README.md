@@ -55,8 +55,8 @@ payment.
 
 | File | Purpose |
 |------|---------|
-| `tranche_params.py` | Monte Carlo engine: IL distribution → `(B, α)` → feasibility + risk metrics |
-| `requirements.txt`  | `numpy` |
+| `tranche_params.py` | Monte Carlo engine: IL distribution → `(B, α)` → feasibility + risk metrics + README charts |
+| `requirements.txt`  | `numpy`, `matplotlib` |
 
 ---
 
@@ -68,7 +68,9 @@ python tranche_params.py
 ```
 
 This prints (1) a sweet-spot search table over holding period, range width, and turnover, and
-(2) a detailed breakdown of a representative case with per-tranche risk metrics.
+(2) a detailed breakdown of a representative case with per-tranche risk metrics. It also writes
+the two charts embedded in the main README (`money_chart.png`, `il_distribution.png`) into this
+directory.
 
 ---
 
@@ -152,17 +154,19 @@ longer horizons (larger IL), and loosens with higher turnover (more fees).
 
 ### Representative result
 
-`σ = 60%`, `T = 30d`, range `±0.5`, turnover `20×`, `λ = 0.30`:
+`σ = 60%`, `T = 30d`, ticks `±6000` (price `[0.5488, 1.8221]`), turnover `20×`, `λ = 0.30`:
 
 ```
-B = 3.88% of principal      α = 0.626  (Junior 62.6% / Senior 37.4%)      premium Δ = 0.57%
+B = 3.88% of principal      α = 0.626  (Junior 62.6% / Senior 37.4%)      premium Δ = 0.65%
 ```
 
 | Tranche | Mean return | Std | 1st pct | Loss probability |
 |---------|-------------|-----|---------|------------------|
-| **Senior**  | +4.25% | 0.010 | −1.07% | **1.5%** |
-| Plain LP    | +4.57% | 0.020 | −3.21% | 4.0% |
-| **Junior**  | +4.90% | 0.032 | −5.88% | **10.5%** |
+| **Senior**  | +4.25% | 0.010 | −0.99% | **1.5%** |
+| Plain LP    | +4.57% | 0.020 | −3.36% | 4.0% |
+| **Junior**  | +4.90% | 0.032 | −5.72% | **10.5%** |
+
+<sub>Transcribed from the Representative-case output of `python tranche_params.py`. When re-deriving, update every occurrence.</sub>
 
 Returns and risk are both **monotone** across the three profiles — a genuine tranche structure:
 Senior trades a little expected return for roughly halved downside; Junior earns a premium for
@@ -179,6 +183,8 @@ The hook constructor takes three immutables. Convert the derived fractions to WA
 | `B`               | `BUFFER_WAD`   | `0.0388 → 38775050248575256` |
 | `α`               | `ALPHA_WAD`    | `0.626  → 626226265377168256` |
 | per-swap fee rate | `HOOK_FEE_WAD` | `rate × 1e18` |
+
+<sub>Transcribed from the Representative-case output of `python tranche_params.py`. When re-deriving, update every occurrence.</sub>
 
 Notes:
 - `HOOK_FEE_WAD` is the **per-swap** additive rate. `F` in the model is its *accumulation* over

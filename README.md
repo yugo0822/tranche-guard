@@ -11,7 +11,7 @@
 ![UHI9](https://img.shields.io/badge/Uniswap%20Hook%20Incubator-cohort%209-FF6B6B)
 
 <p align="center">
-  <img src="analysis/money_chart.png" alt="Risk–return: Senior vs Plain LP vs Junior" width="760">
+  <img src="offchain/money_chart.png" alt="Risk–return: Senior vs Plain LP vs Junior" width="760">
 </p>
 
 ---
@@ -25,7 +25,7 @@ TrancheGuard is a Uniswap v4 hook (`TrancheHook`) that splits a pool into two tr
 
 The two parameters `(B, α)` are **not guessed**. They are derived from a Monte-Carlo simulation of the pair's impermanent-loss distribution and injected as immutable hook parameters at deployment. In the representative case, a Senior LP is **~2.6× less likely** to end a period underwater than a plain LP, for **~0.3%** less expected return.
 
-The on-chain hook enforces the loss waterfall and settlement; the [off-chain actuarial engine](analysis/README.md) decides the parameters.
+The on-chain hook enforces the loss waterfall and settlement; the [off-chain actuarial engine](offchain/README.md) decides the parameters.
 
 ---
 
@@ -79,7 +79,7 @@ immutable hook params              BUFFER_WAD, ALPHA_WAD, HOOK_FEE_WAD
 ```
 
 <p align="center">
-  <img src="analysis/il_distribution.png" alt="Simulated IL distribution with the buffer at the 90th percentile" width="620">
+  <img src="offchain/il_distribution.png" alt="Simulated IL distribution with the buffer at the 90th percentile" width="620">
 </p>
 
 - **Buffer `B`** is a *coverage choice*: pick how often Senior should be whole (e.g. the 90th percentile), and `B` is the loss level that achieves it — so in ~9 of 10 simulated scenarios, Senior loses nothing.
@@ -98,6 +98,8 @@ Same pool, same fees — three risk profiles. Representative case (σ = 60%, 30-
 | **Senior** (protected) | +4.25% | 1.04% | **1.5%** |
 | Plain LP (unprotected) | +4.57% | 2.00% | 4.0% |
 | **Junior** (first-loss) | +4.90% | 3.20% | **10.5%** |
+
+<sub>Transcribed from the Representative-case output of `python tranche_params.py`. When re-deriving, update every occurrence.</sub>
 
 Risk and return are **monotone** across the three profiles — a genuine tranche structure. A Senior LP cuts its probability of ending underwater by ~2.6× versus a plain LP, for about 0.3% less expected return. Junior is paid a premium to take the other side.
 
@@ -144,7 +146,9 @@ Key contracts:
 | Split `α` | 0.626 | `ALPHA_WAD  = 626226265377168256` |
 | Expected IL | 1.43% | — |
 
-> These are one configuration. To derive parameters for a different pair, volatility, range, or horizon, run the [analysis engine](analysis/README.md) and inject the resulting WAD values into the constructor.
+<sub>Transcribed from the Representative-case output of `python tranche_params.py`. When re-deriving, update every occurrence.</sub>
+
+> These are one configuration. To derive parameters for a different pair, volatility, range, or horizon, run the [analysis engine](offchain/README.md) and inject the resulting WAD values into the constructor.
 
 ---
 
@@ -161,7 +165,7 @@ Key contracts:
 │   ├── TrancheHook_limits.t.sol # boundary: IL > buffer, fund-insufficient
 │   ├── TrancheHook_fuzz.t.sol   # fuzz: ILMath properties
 │   └── TrancheTestBase.sol      # shared per-LP test harness
-└── analysis/
+└── offchain/
     ├── tranche_params.py        # Monte Carlo engine: IL dist → (B, α) → metrics
     ├── requirements.txt
     └── README.md                # full parameter derivation & math
@@ -245,7 +249,7 @@ A **tested MVP**, with the edges stated plainly rather than hidden.
 ## References & acknowledgements
 
 - Built for the **Uniswap Hook Incubator (UHI9)** — *Impermanent Loss & Yield* theme.
-- On-chain IL math (`src/ILMath.sol`) mirrors the off-chain `il_concentrated` model; see [`analysis/README.md`](analysis/README.md).
+- On-chain IL math (`src/ILMath.sol`) mirrors the off-chain `il_concentrated` model; see [`offchain/README.md`](offchain/README.md).
 - Uniswap v4 core & periphery; concentrated-liquidity token-amount math.
 - Tranche / waterfall structure draws on standard structured-finance senior–subordinated design.
 
